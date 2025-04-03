@@ -112,6 +112,7 @@ def more_feature(data, sequences=False):
         'scaler_y': scaler_y
     }
 
+    # 如果选择转化为窗口格式
     if sequences:
         time_steps = 10
         X_seq, y_seq = create_sequences(X_scaled, y_scaled, time_steps)
