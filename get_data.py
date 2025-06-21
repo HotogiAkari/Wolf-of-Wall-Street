@@ -16,7 +16,7 @@ def get_data_by_yf(name, start_time, end_time):
     return: 返回pandas DataFrame对象类型
     '''
     try:
-        data = yf.download(name, start=start_time, end=end_time, group_by='tickers')
+        data = yf.download(name, start=start_time, end=end_time)
         if data.empty:
             raise ValueError(f"找不到股票代码 {name}")
         return data

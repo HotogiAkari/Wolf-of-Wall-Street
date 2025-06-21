@@ -1,5 +1,7 @@
 import os
 import pickle
+import pandas as pd
+import numpy as np
 
 '''
 保存获取的数据集或模型
@@ -25,6 +27,7 @@ def save_data(processed_data, directory=None, csv_file='processed_data.csv', pic
 
     # 保存为 CSV
     csv_data = []
+    # 非序列化数据
     df_train = pd.DataFrame(processed_data['X_train'], columns=features)
     df_train['Target'] = processed_data['y_train']
     df_train['Type'] = 'train'
@@ -35,18 +38,22 @@ def save_data(processed_data, directory=None, csv_file='processed_data.csv', pic
     df_test['Type'] = 'test'
     csv_data.append(df_test)
 
+    # 序列化数据：只保存每个窗口的最后一行特征和目标值
     if 'X_train_seq' in processed_data:
         for i in range(processed_data['X_train_seq'].shape[0]):
-            df_seq = pd.DataFrame(processed_data['X_train_seq'][i], columns=features)
-            df_seq['Target'] = processed_data['y_train_seq'][i]
+            # 只取时间窗口的最后一行特征 (形状: (1, 9))
+            df_seq = pd.DataFrame(processed_data['X_train_seq'][i][-1:], columns=features)
+            df_seq['Target'] = processed_data['y_train_seq'][i][0]  # 标量目标值
             df_seq['Type'] = f'train_seq_{i}'
             csv_data.append(df_seq)
         for i in range(processed_data['X_test_seq'].shape[0]):
-            df_seq = pd.DataFrame(processed_data['X_test_seq'][i], columns=features)
-            df_seq['Target'] = processed_data['y_test_seq'][i]
+            # 只取时间窗口的最后一行特征
+            df_seq = pd.DataFrame(processed_data['X_test_seq'][i][-1:], columns=features)
+            df_seq['Target'] = processed_data['y_test_seq'][i][0]  # 标量目标值
             df_seq['Type'] = f'test_seq_{i}'
             csv_data.append(df_seq)
 
+    # 合并并保存 CSV
     combined_df = pd.concat(csv_data, ignore_index=True)
     csv_path = os.path.join(directory, csv_file)
     combined_df.to_csv(csv_path, index=False)
@@ -64,4 +71,4 @@ if __name__ == '__main__':
     data = get_data_by_yf('AAPL', '2020-01-01', '2023-01-01')
     data = no_nan(data)
     processed_data = more_feature(data, sequences=True)
-    save_data(processed_data, directory='dataset', csv_file='processed_data.csv', pickle_file='processed_data.pkl')
+    save_data(processed_data, csv_file='processed_data.csv', pickle_file='processed_data.pkl')
