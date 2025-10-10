@@ -1,0 +1,66 @@
+{
+    "global_settings": {
+        "data_source": "baostock",
+        "tushare_api_token": "6dd70f23715593fa8ff0ea2d08bedeb264679649fd166f1b9190f8a0",
+        "start_date": "2000-01-01",
+        "end_date": "2025-08-31",
+        "benchmark_ticker": "sh.000300",
+        "output_dir": "data/processed",
+        "cache_dir": "data_cache",
+        "model_dir": "models",
+        "raw_ohlcv_cache_dir": "raw_ohlcv",
+        "labeling_horizon": 30
+    },
+    "stocks_to_process": [
+        {
+            "ticker": "601606.SH",
+            "keyword": "长城军工",
+            "industry_etf": "512660.SH",
+            "num_final_features": 30,
+            "num_leaves": 10
+        },
+        {
+            "ticker": "603099.SH",
+            "keyword": "长白山",
+            "industry_etf": "512500.SH",
+            "num_final_features": 35,
+            "num_leaves": 12
+        },
+        {
+            "ticker": "000681.SZ",
+            "keyword": "视觉中国",
+            "industry_etf": "159965.SZ",
+            "num_final_features": 30,
+            "num_leaves": 10
+        },
+        {
+            "ticker": "600519.SH",
+            "keyword": "贵州茅台",
+            "industry_etf": "159928.SZ",
+            "num_final_features": 30,
+            "num_leaves": 10
+        },
+        {
+            "ticker": "000001.SZ",
+            "keyword": "平安银行",
+            "industry_etf": "512800.SH",
+            "num_final_features": 35,
+            "num_leaves": 12
+        },
+        {
+            "ticker": "688256.SH",
+            "keyword": "寒武纪-U",
+            "industry_etf": "159995.SZ",
+            "num_final_features": 50,
+            "num_leaves": 15
+        },
+        {
+            "ticker": "000100.SZ",
+            "keyword": "华星光电(TCL科技)",
+            "industry_etf": "159928.SZ",
+            "num_final_features": 20,
+            "num_leaves": 8,
+            "reg_alpha": 0.5
+        }
+    ]
+}
