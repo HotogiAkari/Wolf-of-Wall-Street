@@ -1,0 +1,137 @@
+# ===================================================================
+# Phoenix Project - 统一配置文件 (config.yaml)
+# ===================================================================
+# 本文件是整个项目的中央控制台，所有实验参数都在此定义。
+
+# --- 1. 全局设定 ---
+# 这部分参数定义了项目的基本环境和全局行为。
+global_settings:
+  seed: 42                      # 全局随机种子。用于保证所有涉及随机性的操作（如模型训练、数据采样）的结果都可以被复现。
+  device: 'gpu'                 # 默认计算设备。'gpu' 会优先使用 CUDA，如果不可用则自动切换到 'cpu'。'cpu' 则强制使用 CPU。
+  model_dir: 'models'           # 存放所有已训练模型、scaler 和 IC 历史记录的主目录。
+  data_cache_dir: 'data_cache'  # 用于缓存从 API 下载的原始数据的目录，避免重复下载，加快后续运行速度。
+  raw_ohlcv_cache_dir: 'raw_ohlcv' # 在 data_cache_dir 下存放原始 OHLCV 数据的子目录名。
+  ic_history_file: 'ic_history.csv' # 训练结束后，用于保存所有模型聚合后 IC 历史记录的文件名。
+  order_history_db: 'order_history.db' # 交易历史 SQLite 数据库的文件名，由 risk_manager 使用。
+  num_model_versions_to_keep: 3 # 模型版本控制。对于每只股票的每个模型，只保留最近的 N 个版本，旧版本会被自动清理。
+  
+  # 定义本次运行要训练的模型类型列表。可以只写 ['lgbm'] 或 ['lstm'] 来单独训练某个模型。
+  models_to_train: ['lgbm', 'lstm'] 
+  
+  # 定义 LGBM 分位数回归模型要预测的分位数。0.5 代表中位数，是核心的点预测。
+  quantiles: [0.05, 0.5, 0.95]
+  
+  # 定义标签列（即预测目标）在 DataFrame 中的列名。
+  label_column: 'label_return'
+  
+  # 定义要计算的技术指标列表。每个指标是一个字典，包含 pandas-ta 库中的指标名称和所需参数。
+  technical_indicators:
+    - name: "ema"
+      params: {"length": 10}
+    - name: "ema"
+      params: {"length": 30}
+    - name: "rsi"
+      params: {"length": 14}
+    - name: "macd"
+      params: {"fast": 12, "slow": 26, "signal": 9}
+    - name: "bbands"
+      params: {"length": 20, "std": 2}
+
+# --- 2. 策略与数据设定 ---
+# 这部分参数定义了数据范围、验证方法和特征工程的核心逻辑。
+strategy_config:
+  # 数据与回测周期
+  start_date: '2000-01-01'      # 所有数据获取和分析的起始日期。
+  end_date: '2025-08-31'        # 所有数据获取和分析的结束日期。
+  benchmark_ticker: 'sh.000300' # 对比基准指数的代码 (用于计算相对强度等特征)，格式需符合 Baostock API 要求。
+  
+  # Walk-Forward (滚动窗口) 验证策略
+  train_window: 500             # 初始/滚动训练窗口的大小（交易日）。
+  val_window: 60                # 验证窗口的大小，也作为每次滚动的步长（交易日）。
+  
+  # 特征工程参数
+  labeling_horizon: 30          # 定义标签的预测周期，即预测未来 N 天的收益率。
+  correlation_window: 30        # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小。
+  correlation_threshold: 0.95   # 初步特征筛选的阈值。如果两个特征的相关性绝对值高于此值，则会移除其中一个，以减少共线性。
+  
+  # 模型融合策略 (用于未来实盘预测)
+  fusion_ic_span: 120           # 在计算模型动态权重时，IC 的指数加权移动平均（EWMA）的 span 参数，值越大权重变化越平滑。
+  fusion_min_weight: 0.2        # 动态融合时，保证任何一个模型的权重不低于此值，增加策略稳定性。
+  
+  # 交易与风险 (用于未来实盘)
+  signal_threshold: 0.01        # 信号强度（如预测收益率）超过此阈值才考虑开仓。
+  duplicate_signal_window_min: 5 # N 分钟内不处理对同一标的的同向信号，防止重复下单。
+  price_deviation_zscore: 3.0   # 如果信号触发价相对于近期波动的 Z-score 超过此值，则认为是异常价格跳变并拒绝信号。
+
+# --- 3. HPO (超参数优化) 设定 ---
+# 这部分配置用于控制 Optuna 自动调参的行为。
+hpo_config:
+  n_trials: 50                  # 对每只股票进行 HPO 时，尝试的参数组合总次数。次数越多，越可能找到好参数，但耗时越长。
+  hpo_num_eval_folds: 3         # 在 HPO 内部评估一组参数时，使用最近的 N 个验证集进行快速评估，以平衡效率和效果。
+  tickers_for_hpo: ['603099.SH', '000100.SZ', '600519.SH'] # 指定一个股票子集来运行 HPO，以找到具有普适性的通用参数。
+
+# --- 4. 默认模型超参数 ---
+# 这是所有模型参数的“基准线”。个股可以在股票池中覆盖这些参数。
+default_model_params:
+  lgbm_params:
+    n_estimators: 200000        # 树的最大数量。通常设置一个很大的值，由早停法来决定最佳数量。
+    learning_rate: 0.01         # 学习率或步长。较小的值需要更多的树，但通常能达到更好的效果。
+    num_leaves: 10              # 一棵树上的最大叶子节点数。是控制模型复杂度的关键参数。
+    min_child_samples: 20       # 一个叶子节点上所需的最少样本数。用于防止过拟合。
+    feature_fraction: 0.8       # 每次迭代时，随机选择 80% 的特征来建树。用于防止过拟合。
+    bagging_fraction: 0.8       # 每次迭代时，随机选择 80% 的数据来建树（行采样）。用于防止过拟合。
+    bagging_freq: 1             # 每 1 次迭代执行一次 bagging。
+    reg_alpha: 0.1              # L1 正则化。
+    reg_lambda: 0.1             # L2 正则化。
+    early_stopping_rounds: 10000 # 早停法。如果在验证集上的表现连续 N 轮没有提升，则停止训练。
+  
+  lstm_params:
+    sequence_length: 90         # 输入 LSTM 模型的时间序列长度（即用过去 N 天的数据来预测未来）。
+    epochs: 200000                # 最大的训练轮次。通常由早停法提前终止。
+    batch_size: 32              # 批次大小。每次更新模型权重时使用的数据样本数。受显存大小限制。
+    learning_rate: 0.001        # 优化器（如 Adam）的学习率。
+    units_1: 64                 # LSTM 第一个隐藏层的神经元数量。
+    units_2: 32                 # LSTM 第二个隐藏层的神经元数量。
+    dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合。
+    early_stopping_rounds_lstm: 5000 # LSTM 的早停法耐心轮次。
+
+# --- 5. 股票池与个股专属配置 ---
+# 定义要处理的所有股票。每个条目都可以选择性地覆盖上面的任何默认参数。
+stocks_to_process:
+  - ticker: '600519.SH'
+    keyword: '贵州茅台'
+    industry_etf: '159928.SZ'
+    tushare_api_token: 'TUSHARE_TOKEN' # 请在这里填入Tushare Token
+
+  - ticker: '000001.SZ'
+    keyword: '平安银行'
+    industry_etf: '512800.SH'
+    # 为平安银行定制更简单的 LGBM 模型 (覆盖默认参数)
+    lgbm_params:
+      num_leaves: 7
+      min_child_samples: 30
+
+  - ticker: '688256.SH'
+    keyword: '寒武纪-U'
+    industry_etf: '159995.SZ'
+    # 为寒武纪定制更长的 LSTM 序列和更复杂的网络 (覆盖默认参数)
+    lstm_params:
+      sequence_length: 90
+      units_1: 128
+      units_2: 64
+
+  - ticker: '601606.SH'
+    keyword: '长城军工'
+    industry_etf: '512660.SH'
+    
+  - ticker: '000681.SZ'
+    keyword: '视觉中国'
+    industry_etf: '159965.SZ'
+
+  - ticker: '603099.SH'
+    keyword: '长白山'
+    industry_etf: '512500.SH'
+
+  - ticker: '000100.SZ'
+    keyword: 'TCL科技'
+    industry_etf: '159928.SZ'
