@@ -53,15 +53,19 @@ def _walk_forward_split(df: pd.DataFrame, config: dict):
         
         start_index += val_window
 
-def run_training_for_ticker(ticker: str, model_type: str, config: dict, force_retrain: bool = False, keyword: str = None) -> pd.DataFrame | None:
+def run_training_for_ticker(
+    df: pd.DataFrame,
+    ticker: str, 
+    model_type: str, 
+    config: dict, 
+    force_retrain: bool = False, 
+    keyword: str = None
+) -> pd.DataFrame | None:
     """
-    为指定的股票和模型类型，执行完整的 Walk-Forward 训练、评估和最终模型保存流程。
+    接收一个 DataFrame，并为其执行完整的 Walk-Forward 训练、评估和最终模型保存流程。
     """
-    # 如果没有提供 keyword，就用 ticker 代替
     display_name = keyword if keyword else ticker
     
-    # --- 核心修正：使用 display_name 进行打印 ---
-    print(f"\n" + "="*80)
     print(f"--- Starting {model_type.upper()} training for {display_name} ({ticker}) ---")
     
     model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / ticker
@@ -83,27 +87,20 @@ def run_training_for_ticker(ticker: str, model_type: str, config: dict, force_re
         'lgbm': LGBMBuilder,
         'lstm': LSTMBuilder
     }
-    builder = builder_map[model_type](config)
+    # 从扁平化的 config 中提取模型专属参数
+    model_specific_params = config.get('global_settings', {}).get(f'{model_type}_params', {})
+    builder_config = {**config, f'{model_type}_params': model_specific_params}
+    builder = builder_map[model_type](builder_config)
 
-    # 2. 健壮的数据加载
-    try:
-        # --- 核心修正：在打印信息中使用 display_name ---
-        df = get_data.get_full_feature_df(ticker, config, keyword=display_name)
-        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-            raise ValueError(f"No valid data returned for ticker {display_name} ({ticker})")
-    except Exception as e:
-        print(f"ERROR: Failed to generate features for {display_name} ({ticker}): {e}. Skipping training.")
-        return None
 
-    # 3. 执行通用的 Walk-Forward 循环
+    # --- 核心修正 4：直接使用传入的 df ---
     all_fold_ics = []
-    folds = list(_walk_forward_split(df, config))
+    folds = list(_walk_forward_split(df, config.get('global_settings',{})))
     if not folds:
-        print(f"WARNNING: No valid folds generated for {display_name} ({ticker}) with current config. Skipping validation.")
+        print(f"WARNNING: No valid folds generated for {display_name} with current config. Skipping validation.")
     else:
         print(f"INFO: Starting Walk-Forward validation for {display_name} ({ticker}) across {len(folds)} folds...")
         
-        # --- 核心修正：在进度条描述中使用 display_name ---
         fold_iterator = tqdm(folds, desc=f"Training {model_type.upper()} on {display_name}", leave=True)
         
         for fold_num, (train_df, val_df) in enumerate(fold_iterator):
@@ -118,7 +115,6 @@ def run_training_for_ticker(ticker: str, model_type: str, config: dict, force_re
             
             # 强制垃圾回收，对深度学习模型尤其重要
             gc.collect()
-        # --- 修正结束 ---
 
     # 4. 在全部数据上训练最终模型
     print(f"INFO: Training final model for {display_name} ({ticker}) on all data...")
@@ -158,4 +154,4 @@ def run_training_for_ticker(ticker: str, model_type: str, config: dict, force_re
         full_ic_history.to_csv(ic_history_path)
         return full_ic_history
         
-    return pd.DataFrame()
+    return full_ic_history

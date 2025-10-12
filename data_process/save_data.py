@@ -55,7 +55,7 @@ def get_processed_data_path(stock_info: dict, config: dict) -> Path:
     target_dir = Path(output_dir_base) / ticker / date_range_str
     return target_dir / f"features_{config_hash}.pkl"
 
-def save_processed_data(processed_data: Dict[str, pd.DataFrame], runtime_configs: Dict[str, Dict], config: Dict):
+def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
     """
     将处理好的数据字典以确定性的方式保存到磁盘。
     """
@@ -63,21 +63,18 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], runtime_configs
         print("没有需要保存的数据。")
         return
         
-    global_settings = config.get('global_settings', {})
-    strategy_config = config.get('strategy_config', {})
+    stocks_config_map = {s['ticker']: s for s in config.get('stocks_to_process', [])}
     
     print("\n" + "="*60)
     print("开始以确定性方式保存处理好的数据...")
     
     for ticker, df in processed_data.items():
         try:
-            # --- 核心修正 1：使用运行时配置来计算哈希和路径 ---
-            runtime_stock_info = runtime_configs.get(ticker)
-            if not runtime_stock_info:
-                continue
+            stock_specific_config = stocks_config_map.get(ticker)
+            if not stock_specific_config: continue
 
-            # --- 核心修正 3：使用新的统一路径函数来获取保存路径 ---
-            target_file_path = get_processed_data_path(runtime_stock_info, config)
+            # 使用统一的路径函数来获取保存路径，它只依赖静态配置
+            target_file_path = get_processed_data_path(stock_specific_config, config)
             target_dir = target_file_path.parent
             target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,9 +89,7 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], runtime_configs
         except Exception as e:
             print(f"    - ERROR: 保存 {ticker} 数据时发生错误: {e}")
             
-    print("\n" + "="*60)
-    print("所有数据保存完毕。")
-    print("="*60)
+    print("--- 所有数据保存完毕。 ---")
 
 def run_data_pipeline(config_path: str):
     """主执行函数：调用数据处理管道，然后将结果保存到指定目录。"""
@@ -110,10 +105,13 @@ def run_data_pipeline(config_path: str):
         print(f"错误: 无法加载或解析配置文件 '{config_path}': {e}")
         return
     
-    processed_data, runtime_configs = process_all_from_config(config_path)
+    processed_data = process_all_from_config(config_path)
 
     if processed_data:
-        save_processed_data(processed_data, runtime_configs, config)
+        # 加载完整的 config 字典以传递给保存函数
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        save_processed_data(processed_data, config)
     else:
         print("未能从数据管道获取任何数据，跳过保存步骤。")
     

@@ -5,15 +5,16 @@ LSTM模型构建 (已修正数据泄露问题)
 
 import gc
 import copy
+import torch
+import warnings
 import numpy as np
 import pandas as pd
-import torch
 import torch.nn as nn
 from tqdm.autonotebook import tqdm
+from typing import Dict, Any, Tuple
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.preprocessing import StandardScaler
-from typing import Dict, Any, Tuple
 
 class LSTMModel(nn.Module):
     """定义 PyTorch LSTM 模型结构。"""
@@ -135,35 +136,39 @@ class LSTMBuilder:
             else:
                 patience_counter += 1
             
-            # --- 核心修正：更新进度条的描述信息 ---
             epoch_iterator.set_postfix(best_val_loss=f"{best_val_loss:.6f}", patience=f"{patience_counter}/{patience}")
 
             if patience_counter >= patience:
-                break # 不再打印早停信息，因为进度条已经显示了
+                break
         
-        # --- 核心修正：在 fold 结束后，打印一次最终的最佳损失 ---
         print(f"    - Fold finished. Best validation loss: {best_val_loss:.6f}")
 
         if best_model_state:
             model.load_state_dict(best_model_state)
 
-        daily_ic_df = pd.DataFrame() # <-- 名字保留，但现在是 Fold IC
+        daily_ic_df = pd.DataFrame()
         
-        if len(X_val) > 0:
+        if len(X_val) > 0 and best_model_state:
+            model.load_state_dict(best_model_state)
             model.eval()
             with torch.no_grad():
                 preds = model(X_val_tensor).cpu().numpy().flatten()
             
             eval_df = pd.DataFrame({'pred': preds, 'y': y_val_seq, 'date': pd.to_datetime(dates_val_seq)})
-            
-            # --- 核心修正：在整个验证集上计算 IC，移除 groupby ---
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", 
+                category=UserWarning, 
+                message="An input array is constant; the correlation coefficient is not defined."
+            )
+
             if len(eval_df) > 1:
                 fold_ic = eval_df['pred'].rank().corr(eval_df['y'].rank(), method='spearman')
                 
                 if pd.notna(fold_ic):
                     last_date = eval_df['date'].max()
                     daily_ic_df = pd.DataFrame([{'date': last_date, 'rank_ic': fold_ic}])
-            # --- 修正结束 ---
 
         del model, X_val_tensor, y_val_tensor, train_loader, train_dataset, X_train, y_train, X_val
         gc.collect()
@@ -175,7 +180,6 @@ class LSTMBuilder:
         """在全部数据上训练最终模型。"""
         features = [col for col in full_df.columns if col != self.label_col]
 
-        # --- 核心修正：创建并训练最终的 scaler ---
         final_scaler = StandardScaler()
         full_df_scaled = full_df.copy()
         full_df_scaled[features] = final_scaler.fit_transform(full_df[features])

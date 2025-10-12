@@ -67,13 +67,21 @@ strategy_config:
 # 这部分配置用于控制 Optuna 自动调参的行为。
 hpo_config:
   n_trials: 50                  # 对每只股票进行 HPO 时，尝试的参数组合总次数。次数越多，越可能找到好参数，但耗时越长。
-  hpo_num_eval_folds: 3         # 在 HPO 内部评估一组参数时，使用最近的 N 个验证集进行快速评估，以平衡效率和效果。
+  hpo_num_eval_folds: 2         # 在 HPO 内部评估一组参数时，使用最近的 N 个验证集进行快速评估，以平衡效率和效果。
   tickers_for_hpo: ['603099.SH', '000100.SZ', '600519.SH'] # 指定一个股票子集来运行 HPO，以找到具有普适性的通用参数。
+  lgbm_hpo_params:
+    # 限制 CPU 核心数为 4
+    n_jobs: 8
+    # 彻底关闭 LightGBM 的所有日志输出
+    verbose: -1
+    # 为 HPO 设置一个更短、更激进的早停轮次，以加速搜索
+    early_stopping_rounds: 50
 
 # --- 4. 默认模型超参数 ---
 # 这是所有模型参数的“基准线”。个股可以在股票池中覆盖这些参数。
 default_model_params:
   lgbm_params:
+    device: 'gpu'
     n_estimators: 200000        # 树的最大数量。通常设置一个很大的值，由早停法来决定最佳数量。
     learning_rate: 0.01         # 学习率或步长。较小的值需要更多的树，但通常能达到更好的效果。
     num_leaves: 10              # 一棵树上的最大叶子节点数。是控制模型复杂度的关键参数。
@@ -83,7 +91,7 @@ default_model_params:
     bagging_freq: 1             # 每 1 次迭代执行一次 bagging。
     reg_alpha: 0.1              # L1 正则化。
     reg_lambda: 0.1             # L2 正则化。
-    early_stopping_rounds: 10000 # 早停法。如果在验证集上的表现连续 N 轮没有提升，则停止训练。
+    early_stopping_rounds: 5000 # 早停法。如果在验证集上的表现连续 N 轮没有提升，则停止训练。
   
   lstm_params:
     sequence_length: 90         # 输入 LSTM 模型的时间序列长度（即用过去 N 天的数据来预测未来）。

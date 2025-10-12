@@ -20,6 +20,56 @@ from data_process import data_contracts
 pro: Optional['ts.ProApi'] = None
 bs_logged_in: bool = False
 
+# ==============================================================================
+# 公共 API 生命周期管理函数
+# ==============================================================================
+
+def initialize_apis(config: Dict):
+    """
+    (公共接口) 初始化所有数据 API。应在任何数据处理任务开始前调用。
+    """
+    global pro, bs_logged_in
+    
+    if not bs_logged_in:
+        print("INFO: Attempting to log in to Baostock...")
+        lg = bs.login()
+        if lg.error_code != '0':
+            raise ConnectionError(f"Baostock 登录失败: {lg.error_msg}")
+        bs_logged_in = True
+        print(f"INFO: Baostock API 登录成功。SDK版本: {bs.__version__}")
+    else:
+        print("INFO: Baostock API is already logged in.")
+    
+    if pro is None:
+        token = config.get('global_settings', {}).get('tushare_api_token')
+        if token and "TOKEN" not in token.upper():
+            try:
+                ts.set_token(token)
+                pro = ts.pro_api()
+                print("INFO: Tushare Pro API 初始化成功。将尝试获取宏观数据。")
+            except Exception as e:
+                print(f"WARNING: Tushare API 初始化失败: {e}。将跳过宏观数据获取。")
+                pro = None
+        else:
+            print("INFO: 未在配置中提供有效的 Tushare Token。将跳过宏观数据获取。")
+
+def shutdown_apis():
+    """
+    (公共接口) 安全地登出所有数据 API，并重置状态。应在所有数据处理任务结束后调用。
+    """
+    global bs_logged_in
+    
+    print("\n" + "="*80)
+    try:
+        if bs_logged_in:
+            bs.logout()
+            bs_logged_in = False # 重置状态标志
+            print("INFO: Baostock API has been logged out successfully.")
+        else:
+            print("INFO: Baostock API was not logged in, no action taken.")
+    except Exception as e:
+        print(f"WARNNING: An error occurred during Baostock logout: {e}")
+
 # ------------------------------------------------------------------------------
 # 内部辅助函数
 # ------------------------------------------------------------------------------
@@ -35,40 +85,30 @@ def _download_with_retry(api_call_func, max_retries=3, initial_delay=0.5):
     delay = initial_delay
     while retries < max_retries:
         try:
-            # 尝试执行 API 调用
             result = api_call_func()
-            # 如果成功，立即返回结果
             return result
         except Exception as e:
-            # 捕获任何异常，特别是网络相关的
             retries += 1
             print(f"  - WARNNING: API call failed (Attempt {retries}/{max_retries}). Retrying in {delay:.2f} seconds. Error: {e}")
-            # 等待一段时间
             time.sleep(delay)
-            # 增加下一次的等待时间 (指数退避)
             delay *= 2
     
-    # 如果所有重试都失败了
     print(f"  - ERROR: API call failed after {max_retries} retries.")
-    # 返回一个模拟的失败结果，以便上游函数处理
     class FailedResponse:
         def __init__(self):
             self.error_code = '-1'
             self.error_msg = 'Max retries exceeded'
         def get_data(self):
             return pd.DataFrame()
-            
     return FailedResponse()
 
 def _get_api_ticker(ticker_from_config: str) -> str:
-    """从配置文件中的ticker (e.g., '600519.SH') 提取出API调用所需的格式 (e.g., 'sh.600519')。"""
     if ticker_from_config is None: return ""
     ticker = ticker_from_config.lower().strip()
     match = re.match(r'(?:(sh|sz)[.\\s]*)?(\d{6})(?:[.\\s]*(sh|sz))?', ticker)
     if not match: return ticker
     groups = match.groups()
-    market = groups[0] or groups[2]
-    code = groups[1]
+    market, code = groups[0] or groups[2], groups[1]
     if not market or not code: return ticker
     return f"{market}.{code}"
 
@@ -101,9 +141,8 @@ def _initialize_apis(config: Dict):
 
 def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, run_config: dict) -> Optional[pd.DataFrame]:
     """[BS] 从 Baostock 获取日线行情数据，优先使用本地缓存 (含延迟和重试)。"""
-    
-    cache_base_dir = Path(run_config.get("global_settings", {}).get("data_cache_dir", "data_cache"))
-    raw_cache_dir = cache_base_dir / run_config.get("global_settings", {}).get("raw_ohlcv_cache_dir", "raw_ohlcv")
+    cache_base_dir = Path(run_config.get("data_cache_dir", "data_cache"))
+    raw_cache_dir = cache_base_dir / run_config.get("raw_ohlcv_cache_dir", "raw_ohlcv")
     raw_cache_dir.mkdir(parents=True, exist_ok=True)
     
     cache_filename = f"raw_{ticker}_{start_date}_{end_date}.pkl"
@@ -114,23 +153,10 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, run_config: 
         return pd.read_pickle(cache_file_path)
 
     print(f"  - [1/7] 正在从 Baostock 下载 {ticker} 的日线行情...")
-    start_fmt = pd.to_datetime(start_date).strftime('%Y-%m-%d')
-    end_fmt = pd.to_datetime(end_date).strftime('%Y-%m-%d')
+    start_fmt, end_fmt = pd.to_datetime(start_date).strftime('%Y-%m-%d'), pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
-    # --- 核心修正：使用带重试的下载逻辑 ---
-    # 定义一个无参数的 lambda 函数来包裹 API 调用
-    api_call = lambda: bs.query_history_k_data_plus(
-        ticker, 
-        "date,open,high,low,close,volume", 
-        start_date=start_fmt, 
-        end_date=end_fmt, 
-        frequency="d", 
-        adjustflag="2"
-    )
-    
-    # 执行带重试的下载
+    api_call = lambda: bs.query_history_k_data_plus(ticker, "date,open,high,low,close,volume", start_date=start_fmt, end_date=end_fmt, frequency="d", adjustflag="2")
     rs = _download_with_retry(api_call)
-    # --- 修正结束 ---
     
     if rs.error_code != '0':
         print(f"  - WARNING [BS]: 获取 {ticker} 数据失败: {rs.error_msg}")
@@ -197,50 +223,40 @@ def _add_relative_performance_features(df: pd.DataFrame, benchmark_df: pd.DataFr
     df['correlation_vs_industry'] = df['close'].pct_change().rolling(window).corr(df['industry_close'].pct_change())
     return df
 
-def _make_features_stationary(df: pd.DataFrame) -> pd.DataFrame:
+def _make_features_stationary(df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
     """[计算] 对价格类特征进行平稳化处理。"""
     print("  - [5/7] 正在对特征进行平稳化...")
-    # 从配置中获取需要平稳化的列
-    cols_to_log_return = df.columns.intersection(
-        ['open', 'high', 'low', 'close', 'benchmark_close', 'industry_close', 'cpi', 'm2']
-    )
+    cols_to_log_return = df.columns.intersection(['open', 'high', 'low', 'close', 'benchmark_close', 'industry_close', 'cpi', 'm2'])
     for col in cols_to_log_return:
-        df[f'{col}_log_return'] = np.log(df[col] / df[col].shift(1))
+        if col in df.columns: 
+            df[f'{col}_log_return'] = np.log(df[col] / df[col].shift(1))
     return df
 
-def _create_and_clean_labels(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def _create_and_clean_labels(df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
     """[计算] 创建用于预测的标签，并进行降噪处理。"""
     print("  - [6/7] 正在创建并降噪预测标签...")
-    horizon = config.get("labeling_horizon", 30)
-    label_col = config.get('label_column', 'label_return')
-    
+    horizon = run_config.get("labeling_horizon", 30)
+    label_col = run_config.get('label_column', 'label_return')
     df[label_col] = df['close'].pct_change(periods=horizon).shift(-horizon)
-    lower_bound = df[label_col].quantile(0.01)
-    upper_bound = df[label_col].quantile(0.99)
+    lower_bound, upper_bound = df[label_col].quantile(0.01), df[label_col].quantile(0.99)
     df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
     return df
 
-def _initial_feature_selection(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def _initial_feature_selection(df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
     """[计算] 进行初步的特征筛选，剔除高度共线性的特征。"""
     print("  - [7/7] 正在进行初步特征筛选...")
-    
-    # --- 核心修正：保护核心列不被移除 ---
     core_features = {'open', 'high', 'low', 'close', 'volume'}
-    
     numeric_df = df.select_dtypes(include=np.number)
-    
-    # 从相关性计算中排除核心列，以避免它们被错误识别
     features_to_check = [col for col in numeric_df.columns if col not in core_features]
     if not features_to_check:
-        print("    - 没有非核心特征需要检查相关性。")
-        return df
-
+        print("    - 没有非核心特征需要检查相关性。"); return df
     corr_matrix = numeric_df[features_to_check].corr().abs()
     upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    threshold = config.get("strategy_config",{}).get("correlation_threshold", 0.95)
+    
+    # --- 核心修正：从 run_config 中获取阈值 ---
+    threshold = run_config.get("correlation_threshold", 0.95)
     
     to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > threshold)]
-    
     if to_drop:
         df.drop(columns=to_drop, inplace=True, errors='ignore')
         print(f"    - 移除了 {len(to_drop)} 个高相关性特征: {to_drop}")
@@ -251,10 +267,9 @@ def _initial_feature_selection(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 # ------------------------------------------------------------------------------
 # 公共 API 函数
 # ------------------------------------------------------------------------------
-def get_full_feature_df(ticker: str, config: Dict, keyword: str = None) -> Tuple[Optional[pd.DataFrame], Dict]:
+def get_full_feature_df(ticker: str, config: Dict, keyword: str = None) -> Optional[pd.DataFrame]:
     """
-    为单个股票执行完整的特征生成流程。
-    返回一个元组: (处理好的 DataFrame 或 None, 实际使用的配置字典)
+    (公共接口) 为单个股票执行完整的特征生成流程。
     """
     display_name = keyword if keyword else ticker
     print(f"\n--- Generating features for {display_name} ({ticker}) ---")
@@ -263,53 +278,42 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None) -> Tuple
     strategy_config = config.get('strategy_config', {})
     stock_info = next((s for s in config.get('stocks_to_process', []) if s['ticker'] == ticker), {})
     run_config = {**global_settings, **strategy_config, **stock_info}
-    
-    # 在函数开始时就准备好 stock_info_runtime，以便任何退出路径都能返回它
-    stock_info_runtime = stock_info.copy()
 
-    start_date = run_config.get('start_date')
-    end_date = run_config.get('end_date')
-    benchmark_ticker = run_config.get('benchmark_ticker')
-    industry_etf_ticker = run_config.get('industry_etf')
+    start_date, end_date = run_config.get('start_date'), run_config.get('end_date')
+    benchmark_ticker, industry_etf_ticker = run_config.get('benchmark_ticker'), run_config.get('industry_etf')
 
     if not benchmark_ticker or not industry_etf_ticker:
         print(f"ERROR: Missing 'benchmark_ticker' or 'industry_etf' for {display_name}.")
-        return None, stock_info_runtime # <--- 修正 1
+        return None
 
     api_ticker = _get_api_ticker(ticker)
     api_benchmark = _get_api_ticker(benchmark_ticker)
     api_industry = _get_api_ticker(industry_etf_ticker)
 
     df = _get_ohlcv_data_bs(api_ticker, start_date, end_date, run_config)
-    if df is None: 
-        return None, stock_info_runtime # <--- 修正 2
+    if df is None: return None
 
     macro_df = _get_macroeconomic_data_cn(start_date, end_date, run_config)
     if macro_df is not None and not macro_df.empty:
-        print("INFO: Merging macroeconomic data.")
         df = pd.merge_asof(df.sort_index(), macro_df.sort_index(), left_index=True, right_index=True, direction='backward')
-    else:
-        print("INFO: No macroeconomic data to merge. Proceeding without it.")
     
     df = feature_calculators.run_all_feature_calculators(df, run_config)
     
     bench_df_raw = _get_ohlcv_data_bs(api_benchmark, start_date, end_date, run_config)
     if bench_df_raw is None:
-        print(f"ERROR: Could not get benchmark data for {display_name}. Aborting feature generation.")
-        return None, stock_info_runtime # <--- 修正 3
+        print(f"ERROR: Could not get benchmark data for {display_name}. Aborting."); return None
     bench_df = bench_df_raw['close'].rename('benchmark_close')
 
     ind_df_raw = _get_ohlcv_data_bs(api_industry, start_date, end_date, run_config)
     if ind_df_raw is None:
-        print(f"WARNNING: Could not get industry data for {display_name}. Using benchmark data as a fallback for industry.")
+        print(f"WARNNING: Could not get industry data for {display_name}. Using benchmark as fallback.")
         ind_df = bench_df_raw['close'].rename('industry_close')
-        stock_info_runtime['industry_etf'] = benchmark_ticker
     else:
         ind_df = ind_df_raw['close'].rename('industry_close')
         
     df = _add_relative_performance_features(df, bench_df, ind_df, run_config)
     
-    df = _make_features_stationary(df)
+    df = _make_features_stationary(df, run_config)
     df = _create_and_clean_labels(df, run_config)
     df = _initial_feature_selection(df, run_config)
     
@@ -320,27 +324,24 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None) -> Tuple
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
     label_col = run_config.get('label_column', 'label_return')
-    if label_col in df.columns:
-        df.dropna(subset=[label_col], inplace=True)
+    if label_col in df.columns: df.dropna(subset=[label_col], inplace=True)
     
     feature_cols = [col for col in df.columns if col != label_col]
     df.dropna(subset=feature_cols, inplace=True)
     
     if df.empty: 
-        print(f"WARNNING: DataFrame is empty for {display_name} after all processing.")
-        return None, stock_info_runtime
+        print(f"WARNNING: DataFrame is empty for {display_name} after all processing."); return None
     
     validator = data_contracts.DataValidator(run_config)
     if not validator.validate_schema(df):
-        print(f"ERROR: Final data validation failed for {display_name}. Aborting.")
-        return None, stock_info_runtime
+        print(f"ERROR: Final data validation failed for {display_name}. Aborting."); return None
         
     print(f"--- SUCCESS: Features generated for {display_name}. Shape: {df.shape} ---")
-    return df, stock_info_runtime
+    return df
 
 def process_all_from_config(config_path: str) -> Dict[str, pd.DataFrame]:
     """
-    根据配置文件，为所有股票生成特征并返回一个字典。
+    (公共接口) 根据配置文件，为所有股票生成特征。
     """
     print("\n" + "="*80)
     print("--- Starting Batch Feature Generation Process ---")
@@ -349,34 +350,24 @@ def process_all_from_config(config_path: str) -> Dict[str, pd.DataFrame]:
 
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            if config_path.endswith(('.yaml', '.yml')):
-                config = yaml.safe_load(f)
-            else:
-                config = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, yaml.YAMLError) as e:
+            config = yaml.safe_load(f) if config_path.endswith(('.yaml', '.yml')) else json.load(f)
+    except Exception as e:
         print(f"ERROR: Config file {config_path} not found or failed to parse: {e}"); return {}
     
-    try:
-        _initialize_apis(config)
-    except ConnectionError as e:
-        print(f"ERROR: API initialization failed: {e}"); return {}
-
+    # 注意：initialize_apis 应该由更高层（Notebook）调用来管理生命周期，这里不再调用
+    
     results_df = {}
-    results_runtime_config = {} # 新增一个字典来存储运行时的配置
     stocks_to_process = config.get('stocks_to_process', [])
+    if not stocks_to_process:
+        print("WARNNING: 'stocks_to_process' list is empty or not found. No data will be processed."); return {}
     
     for i, stock_info in enumerate(stocks_to_process, 1):
-        ticker = stock_info.get('ticker')
-        keyword = stock_info.get('keyword', ticker)
-        
+        ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
         if not ticker: 
-            print("  - WARNNING: Skipping invalid config entry (missing ticker)."); continue
+            print(f"  - WARNNING: Skipping invalid config entry at index {i-1} (missing ticker)."); continue
         
-        df, runtime_stock_info = get_full_feature_df(ticker, config, keyword)
-        
-        if df is not None:
-            results_df[ticker] = df
-            results_runtime_config[ticker] = runtime_stock_info
+        df = get_full_feature_df(ticker, config, keyword)
+        if df is not None: results_df[ticker] = df
     
     print("--- Batch Feature Generation Process Finished ---")
-    return results_df, results_runtime_config
+    return results_df
