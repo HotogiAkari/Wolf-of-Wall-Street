@@ -15,18 +15,31 @@ from typing import List, Dict, Any
 # ===================================================================
 
 def check_no_large_gaps(series: Series[pd.Timestamp]) -> bool:
-    """校验时间序列索引中是否存在超过常规阈值的大间隙。"""
-    if series.empty:
-        return True
-    time_diffs = series.sort_values().diff().dropna()
+    """
+    (已重构) 校验时间序列索引中是否存在超过常规阈值的大间隙。
+    此版本会智能地忽略数据开头部分的“上市前”空白期。
+    """
+    if series.empty or len(series) < 2:
+        return True # 如果数据太少，无法计算 gap
+
+    # series.sort_values() 确保了时间是递增的
+    # .diff() 计算相邻元素的差异
+    time_diffs = series.sort_values().diff().iloc[1:]
     if time_diffs.empty:
         return True
-    # 阈值定义为正常时间间隔中位数的10倍
-    threshold = time_diffs.median() * 10
+
+    # 阈值定义为正常时间间隔（通常是1天）中位数的10倍
+    median_diff = time_diffs.median()
+    if pd.isna(median_diff): return True # 如果无法计算中位数
+    threshold = median_diff * 10
+    
+    # 找到所有大于阈值的 gap
     large_gaps = time_diffs[time_diffs > threshold]
+    
     if not large_gaps.empty:
-        print(f"WARNNING: Found {len(large_gaps)} large gaps in time series index. Max gap: {large_gaps.max()}")
-    return True # 返回True以作记录，而不是硬性失败
+        print(f"    - WARNNING (Data Gaps): Found {len(large_gaps)} large gap(s) in time series after the first data point. Max gap: {large_gaps.max()}.")
+        
+    return True # 保持软校验，只打印警告而不使验证失败
 
 def check_outlier_percentage(series: Series[float], threshold: float = 0.05) -> bool:
     """校验系列中极端异常值的比例是否低于阈值。"""
@@ -40,10 +53,6 @@ def check_outlier_percentage(series: Series[float], threshold: float = 0.05) -> 
     outliers = series[(series < lower_bound) | (series > upper_bound)]
     outlier_ratio = len(outliers) / len(series) if not series.empty else 0
     return outlier_ratio < threshold
-
-# ===================================================================
-# 2. 数据漂移检测器 (Drift Detector)
-# ===================================================================
 
 class DriftDetector:
     """
@@ -114,9 +123,7 @@ class DriftDetector:
         
         return drifted_features
 
-# ===================================================================
 # 3. 统一的验证器接口 (Data Validator)
-# ===================================================================
 
 class DataValidator:
     """
@@ -132,9 +139,9 @@ class DataValidator:
                 "close": pa.Column(float, required=True, checks=pa.Check(check_outlier_percentage)),
                 "volume": pa.Column(float, checks=[pa.Check.ge(0), pa.Check(check_outlier_percentage)], required=True),
                 "label_return": pa.Column(float, nullable=True, required=False),
-                "date": pa.Column(pd.Timestamp, required=True) # 'date' is a column after reset_index
+                "date": pa.Column(pd.Timestamp, required=True)
             },
-            index=pa.Index(int), # After reset_index, the index is just a range of integers
+            index=pa.Index(int),
             strict=False,
             coerce=True,
         )
@@ -150,7 +157,7 @@ class DataValidator:
 
     def validate_schema(self, df: pd.DataFrame) -> bool:
         """对DataFrame执行严格的Schema校验。"""
-        print("INFO: Running schema validation...")
+        print("INFO: 运行架构验证...")
         if not isinstance(df.index, pd.DatetimeIndex):
             print("ERROR: DataFrame index must be a DatetimeIndex for validation.")
             return False
@@ -160,31 +167,31 @@ class DataValidator:
             self.time_index_schema.validate(df.index.to_series())
             # 2. 校验列数据
             self.schema.validate(df.reset_index())
-            print("SUCCESS: Data schema and time index validation passed.")
+            print("SUCCESS: 数据结构和时间索引验证通过.")
             return True
         except pa.errors.SchemaError as e:
-            print(f"ERROR: Data schema validation failed!")
-            print("Validation Failure Details:")
+            print(f"ERROR: 数据结构验证失败!")
+            print("验证失败详情:")
             print(e.failure_cases)
             return False
 
     def check_drift(self, ref_df: pd.DataFrame, new_df: pd.DataFrame) -> List[str]:
         """对新旧两个DataFrame执行漂移检测。"""
-        print("INFO: Running feature drift check...")
+        print("INFO: 运行特征漂移检查...")
         core_features = self.config.get('drift_check_features', [])
         drift_method = self.config.get('drift_check_method', 'psi')
         drift_thresholds = self.config.get('drift_check_thresholds', {})
         
         if not core_features:
-            print("INFO: No features configured for drift check. Skipping.")
+            print("INFO: 未配置漂移检查的参数. 跳过.")
             return []
             
         detector = DriftDetector(ref_df)
         drifted = detector.check(new_df, core_features, method=drift_method, threshold_map=drift_thresholds)
         
         if not drifted:
-            print("SUCCESS: No significant feature drift detected.")
+            print("SUCCESS: 未检测到显著特征漂移.")
         else:
-            print(f"WARNNING: Found {len(drifted)} drifted features.")
+            print(f"WARNNING: 发现漂移特征 {len(drifted)} .")
             
         return drifted

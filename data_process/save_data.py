@@ -65,8 +65,7 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
         
     stocks_config_map = {s['ticker']: s for s in config.get('stocks_to_process', [])}
     
-    print("\n" + "="*60)
-    print("开始以确定性方式保存处理好的数据...")
+    print("保存处理好的数据...")
     
     for ticker, df in processed_data.items():
         try:
@@ -92,28 +91,46 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
     print("--- 所有数据保存完毕。 ---")
 
 def run_data_pipeline(config_path: str):
-    """主执行函数：调用数据处理管道，然后将结果保存到指定目录。"""
-    print("="*60); print("开始执行数据管道协调任务..."); print(f"将使用配置文件: {config_path}"); print("="*60)
+    """
+    主执行函数：智能地处理数据。
+    """
+    print("开始执行数据管道协调任务..."); print(f"将使用配置文件: {config_path}")
     
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            if config_path.endswith(('.yaml', '.yml')):
-                config = yaml.safe_load(f)
-            else:
-                config = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, yaml.YAMLError) as e:
+            config = yaml.safe_load(f) if config_path.endswith(('.yaml', '.yml')) else json.load(f)
+    except Exception as e:
         print(f"错误: 无法加载或解析配置文件 '{config_path}': {e}")
         return
-    
-    processed_data = process_all_from_config(config_path)
+
+    stocks_to_process = config.get('stocks_to_process', [])
+    if not stocks_to_process:
+        print("WARNNING: 股票池为空，无需处理。")
+        return
+        
+    tickers_to_generate = []
+    for stock_info in stocks_to_process:
+        # 使用官方路径函数检查文件是否存在
+        target_file_path = get_processed_data_path(stock_info, config)
+        if target_file_path.exists():
+            keyword = stock_info.get('keyword', stock_info.get('ticker'))
+            print(f"INFO: 特征文件已存在于 {target_file_path}，跳过 {keyword} 的数据处理。")
+        else:
+            # 如果文件不存在，则将该股票加入待处理列表
+            tickers_to_generate.append(stock_info['ticker'])
+
+    if not tickers_to_generate:
+        print("\n所有股票的特征文件均已存在。无需执行数据处理流水线。")
+        return
+        
+    print(f"\n需要为以下 {len(tickers_to_generate)} 只股票生成新数据: {tickers_to_generate}")
+
+    processed_data = process_all_from_config(config_path, tickers_to_generate=tickers_to_generate)
 
     if processed_data:
-        # 加载完整的 config 字典以传递给保存函数
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
         save_processed_data(processed_data, config)
     else:
-        print("未能从数据管道获取任何数据，跳过保存步骤。")
+        print("未能从数据管道获取任何新数据，跳过保存步骤。")
     
     print("\n数据管道协调任务执行完毕。")
 

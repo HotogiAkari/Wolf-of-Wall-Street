@@ -14,6 +14,8 @@ global_settings:
   ic_history_file: 'ic_history.csv' # 训练结束后，用于保存所有模型聚合后 IC 历史记录的文件名。
   order_history_db: 'order_history.db' # 交易历史 SQLite 数据库的文件名，由 risk_manager 使用。
   num_model_versions_to_keep: 3 # 模型版本控制。对于每只股票的每个模型，只保留最近的 N 个版本，旧版本会被自动清理。
+
+  tushare_api_token: 'TUSHARE_TOKEN' # 请在这里填入Tushare Token
   
   # 定义本次运行要训练的模型类型列表。可以只写 ['lgbm'] 或 ['lstm'] 来单独训练某个模型。
   models_to_train: ['lgbm', 'lstm'] 
@@ -41,8 +43,9 @@ global_settings:
 # 这部分参数定义了数据范围、验证方法和特征工程的核心逻辑。
 strategy_config:
   # 数据与回测周期
-  start_date: '2000-01-01'      # 所有数据获取和分析的起始日期。
   end_date: '2025-08-31'        # 所有数据获取和分析的结束日期。
+  data_lookback_years: 10      # ：数据回溯的年限
+  earliest_start_date: '2010-01-01' # 最早可接受的数据起始日期。
   benchmark_ticker: 'sh.000300' # 对比基准指数的代码 (用于计算相对强度等特征)，格式需符合 Baostock API 要求。
   
   # Walk-Forward (滚动窗口) 验证策略
@@ -70,38 +73,40 @@ hpo_config:
   hpo_num_eval_folds: 2         # 在 HPO 内部评估一组参数时，使用最近的 N 个验证集进行快速评估，以平衡效率和效果。
   tickers_for_hpo: ['603099.SH', '000100.SZ', '600519.SH'] # 指定一个股票子集来运行 HPO，以找到具有普适性的通用参数。
   lgbm_hpo_params:
-    # 限制 CPU 核心数为 4
-    n_jobs: 8
-    # 彻底关闭 LightGBM 的所有日志输出
-    verbose: -1
-    # 为 HPO 设置一个更短、更激进的早停轮次，以加速搜索
-    early_stopping_rounds: 50
+    n_jobs: 8                   # 限制 CPU 核心数为 8
+    verbose: -1                 # 彻底关闭 LightGBM 的所有日志输出
+    early_stopping_rounds: 50   # 为 HPO 设置一个独立的早停轮次，以加速搜索
+    verbose_period: 0           # 设为 0 或 -1 表示在 HPO 期间关闭迭代日志，只看 Optuna 的结果。如果是 > 0 的整数，则每隔 N 轮打印一次。
 
 # --- 4. 默认模型超参数 ---
 # 这是所有模型参数的“基准线”。个股可以在股票池中覆盖这些参数。
 default_model_params:
   lgbm_params:
     device: 'gpu'
+    n_jobs: 8                   # 限制 CPU 核心数为 8
+    verbose: -1                 # 控制 C++ 内核日志
+    verbose_period: 20000          # 表示主训练时，每 n 轮打印一次验证集损失
     n_estimators: 200000        # 树的最大数量。通常设置一个很大的值，由早停法来决定最佳数量。
-    learning_rate: 0.01         # 学习率或步长。较小的值需要更多的树，但通常能达到更好的效果。
-    num_leaves: 10              # 一棵树上的最大叶子节点数。是控制模型复杂度的关键参数。
-    min_child_samples: 20       # 一个叶子节点上所需的最少样本数。用于防止过拟合。
-    feature_fraction: 0.8       # 每次迭代时，随机选择 80% 的特征来建树。用于防止过拟合。
+    feature_fraction: 0.8005786090055831       # 每次迭代时，随机选择 80% 的特征来建树。用于防止过拟合。
+    learning_rate: 0.030297480627572117         # 学习率或步长。较小的值需要更多的树，但通常能达到更好的效果。
+    min_child_samples: 49       # 一个叶子节点上所需的最少样本数。用于防止过拟合。
+    num_leaves: 18              # 一棵树上的最大叶子节点数。是控制模型复杂度的关键参数。
+    reg_alpha: 1.136126759483552              # L1 正则化。
+    reg_lambda: 2.027927483904424            # L2 正则化。
     bagging_fraction: 0.8       # 每次迭代时，随机选择 80% 的数据来建树（行采样）。用于防止过拟合。
     bagging_freq: 1             # 每 1 次迭代执行一次 bagging。
-    reg_alpha: 0.1              # L1 正则化。
-    reg_lambda: 0.1             # L2 正则化。
     early_stopping_rounds: 5000 # 早停法。如果在验证集上的表现连续 N 轮没有提升，则停止训练。
   
   lstm_params:
+    verbose_period: 500
     sequence_length: 90         # 输入 LSTM 模型的时间序列长度（即用过去 N 天的数据来预测未来）。
-    epochs: 200000                # 最大的训练轮次。通常由早停法提前终止。
+    epochs: 2000                # 最大的训练轮次。通常由早停法提前终止。
     batch_size: 32              # 批次大小。每次更新模型权重时使用的数据样本数。受显存大小限制。
     learning_rate: 0.001        # 优化器（如 Adam）的学习率。
     units_1: 64                 # LSTM 第一个隐藏层的神经元数量。
     units_2: 32                 # LSTM 第二个隐藏层的神经元数量。
     dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合。
-    early_stopping_rounds_lstm: 5000 # LSTM 的早停法耐心轮次。
+    early_stopping_rounds_lstm: 500 # LSTM 的早停法耐心轮次。
 
 # --- 5. 股票池与个股专属配置 ---
 # 定义要处理的所有股票。每个条目都可以选择性地覆盖上面的任何默认参数。
@@ -109,7 +114,6 @@ stocks_to_process:
   - ticker: '600519.SH'
     keyword: '贵州茅台'
     industry_etf: '159928.SZ'
-    tushare_api_token: 'TUSHARE_TOKEN' # 请在这里填入Tushare Token
 
   - ticker: '000001.SZ'
     keyword: '平安银行'
