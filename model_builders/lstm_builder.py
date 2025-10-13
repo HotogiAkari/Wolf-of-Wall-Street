@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 from tqdm.autonotebook import tqdm
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -67,14 +67,13 @@ class LSTMBuilder:
             
         return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32), np.array(dates)
 
-    def train_and_evaluate_fold(self, train_df: pd.DataFrame = None, val_df: pd.DataFrame = None, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame]:
+    def train_and_evaluate_fold(self, train_df: pd.DataFrame = None, val_df: pd.DataFrame = None, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
         """
-        (已重构) 接收预处理好的 Tensors，只执行模型训练和评估。
+        (已重构) 接收预处理好的 Tensors，执行模型训练和评估，并返回 3 个值。
         """
-        if not cached_data:
-            raise ValueError("train_and_evaluate_fold requires 'cached_data'.")
+        if not cached_data: raise ValueError("train_and_evaluate_fold now requires 'cached_data'.")
 
-        # --- 核心修正：直接从缓存中获取 Tensors ---
+        # --- 从缓存中获取 Tensors ---
         X_train_tensor = cached_data['X_train_tensor'].to(self.device)
         y_train_tensor = cached_data['y_train_tensor'].to(self.device)
         X_val_tensor = cached_data['X_val_tensor'].to(self.device)
@@ -83,12 +82,24 @@ class LSTMBuilder:
         dates_val_seq = cached_data['dates_val_seq']
 
         if X_train_tensor.shape[0] == 0 or X_val_tensor.shape[0] == 0:
-            return {'model_state_dict': None}, pd.DataFrame()
+            # 确保即使提前退出，也返回 3 个值
+            return {'model_state_dict': None}, pd.DataFrame(), pd.DataFrame()
 
         p = self.lstm_params
-        batch_size = p.get('batch_size', 32)
+        batch_size = p.get('batch_size', 32)    # 默认 batch 大小为32
+        num_workers = p.get('num_workers', 0)   # 默认为 0，保证在未配置时也能安全运行
+        if num_workers > 0:
+            print(f"INFO: DataLoader will use {num_workers} parallel workers.")
+
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            num_workers=num_workers,  # <--- 启用并行数据加载
+            pin_memory=True,          # <--- 启用内存锁定以加速传输
+            drop_last=True            # (可选) 如果最后一个 batch 不完整，则丢弃，可以稳定训练
+        )
         
         model = LSTMModel(
             input_size=X_train_tensor.shape[2],
@@ -99,28 +110,33 @@ class LSTMBuilder:
         
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
-        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5, verbose=False)
-        scaler_amp = torch.cuda.amp.GradScaler(enabled=(self.device == 'cuda'))
+        
+        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
+        scaler_amp = torch.amp.GradScaler(enabled=(self.device == 'cuda'))
 
         best_val_loss, patience_counter, best_model_state = float('inf'), 0, None
         patience = p.get('early_stopping_rounds_lstm', 50)
-        
         epochs = p.get('epochs', 100)
         verbose_period = p.get('verbose_period', 5)
+        
         epoch_iterator = tqdm(range(epochs), desc="    - Epochs", leave=False)
         
         for epoch in epoch_iterator:
             model.train()
             for X_batch, y_batch in train_loader:
                 optimizer.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=(self.device == 'cuda')):
-                    outputs = model(X_batch); loss = criterion(outputs, y_batch)
-                scaler_amp.scale(loss).backward(); scaler_amp.step(optimizer); scaler_amp.update()
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=(self.device == 'cuda')):
+                    outputs = model(X_batch)
+                    loss = criterion(outputs, y_batch)
+                scaler_amp.scale(loss).backward()
+                scaler_amp.step(optimizer)
+                scaler_amp.update()
             
             model.eval()
             with torch.no_grad():
-                with torch.cuda.amp.autocast(enabled=(self.device == 'cuda')):
-                    val_outputs = model(X_val_tensor); val_loss = criterion(val_outputs, y_val_tensor)
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=(self.device == 'cuda')):
+                    val_outputs = model(X_val_tensor)
+                    val_loss = criterion(val_outputs, y_val_tensor)
             
             scheduler.step(val_loss)
             
@@ -131,35 +147,47 @@ class LSTMBuilder:
                 patience_counter += 1
             
             if verbose_period > 0 and (epoch + 1) % verbose_period == 0:
-                epoch_iterator.set_postfix(best_val_loss=f"{best_val_loss:.6f}")
+                # 动态更新前面的描述
+                epoch_iterator.set_description(f"    - Epochs {epoch + 1}")
+                # 更新后面的附加信息
+                epoch_iterator.set_postfix(
+                    total_epochs=epochs, 
+                    best_val_loss=f"{best_val_loss:.6f}"
+                )
 
             if patience_counter >= patience: break
         
-        print(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
+        # print(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
 
-        daily_ic_df = pd.DataFrame()
+        ic_df = pd.DataFrame()
+        oof_df = pd.DataFrame()
+
         if X_val_tensor.shape[0] > 0 and best_model_state:
             model.load_state_dict(best_model_state)
             model.eval()
             with torch.no_grad():
                 preds = model(X_val_tensor).cpu().numpy().flatten()
             
-            eval_df = pd.DataFrame({'pred': preds, 'y': y_val_seq, 'date': pd.to_datetime(dates_val_seq)})
+            eval_df = pd.DataFrame({'y_pred': preds, 'y_true': y_val_seq, 'date': pd.to_datetime(dates_val_seq)})
+            
+            oof_df = eval_df[['date', 'y_true', 'y_pred']]
             
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 if len(eval_df) > 1:
                     try:
-                        fold_ic = eval_df['pred'].rank().corr(eval_df['y'].rank(), method='spearman')
+                        fold_ic = eval_df['y_pred'].rank().corr(eval_df['y_true'].rank(), method='spearman')
                         if pd.notna(fold_ic):
-                            daily_ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
-                    except Exception: pass
+                            ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
+                    except Exception: 
+                        pass
 
         del model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, train_loader
         gc.collect()
         if self.device == 'cuda': torch.cuda.empty_cache()
             
-        return {'model_state_dict': best_model_state}, daily_ic_df
+        # --- 核心修正 2：确保总是返回 3 个元素的元组 ---
+        return {'model_state_dict': best_model_state}, ic_df, oof_df
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
         """在全部数据上训练最终模型 (此函数保持独立，不使用缓存)。"""

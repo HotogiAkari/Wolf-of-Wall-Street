@@ -4,7 +4,6 @@
 '''
 
 import pandas as pd
-import numpy as np
 
 class DynamicWeightingStrategy:
     def __init__(self, ticker: str, full_ic_history_df: pd.DataFrame, config: dict):
@@ -17,7 +16,7 @@ class DynamicWeightingStrategy:
         self.w_lstm = 0.5
         
         if full_ic_history_df.empty:
-            print(f"WARNNING: IC history DataFrame is empty. Using equal weights for {ticker}.")
+            print(f"WARNNING: IC 历史数据框为空。正在为 {ticker} 使用等权重.")
             return
 
         try:
@@ -32,7 +31,7 @@ class DynamicWeightingStrategy:
             ]['rank_ic']
 
             if ic_lgbm_series.empty or ic_lstm_series.empty:
-                print(f"WARNNING: IC history for {ticker} is incomplete. Using equal weights.")
+                print(f"WARNNING: {ticker} 的IC历史不完整。使用等权重.")
                 return
 
             strategy_cfg = self.config.get('strategy_config', {})
@@ -43,7 +42,7 @@ class DynamicWeightingStrategy:
             
             total_ic = rolling_ic_lgbm + rolling_ic_lstm
             if total_ic < 1e-8:
-                print(f"WARNNING: Total rolling IC for {ticker} is near zero. Using equal weights.")
+                print(f"WARNNING: {ticker} 的总滚动 IC 接近零。使用等权重.")
                 return
 
             min_weight = strategy_cfg.get("fusion_min_weight", 0.2)
@@ -57,7 +56,7 @@ class DynamicWeightingStrategy:
                 self.w_lstm = min_weight
                 self.w_lgbm = 1 - min_weight
             
-            print(f"INFO: Fusion weights for {ticker} -> LGBM: {self.w_lgbm:.2%}, LSTM: {self.w_lstm:.2%}")
+            print(f"INFO: {ticker} 的融合权重 -> LGBM: {self.w_lgbm:.2%}, LSTM: {self.w_lstm:.2%}")
 
         except (KeyError, IndexError) as e:
             print(f"WARNNING: Could not calculate weights for {ticker} due to data issue: {e}. Using equal weights.")
@@ -67,7 +66,7 @@ class DynamicWeightingStrategy:
         在Z-score标准化后的空间中融合来自不同模型的预测。
         """
         if historical_preds.empty or 'lgbm_pred' not in historical_preds or 'lstm_pred' not in historical_preds:
-            print("WARNNING: Historical predictions are empty or missing columns. Cannot perform fusion.")
+            print("WARNNING: 历史预测为空或缺少列。无法执行融合.")
             # 返回一个基于LGBM中位数的默认值
             return {key: val for key, val in pred_lgbm_dict.items()}
 

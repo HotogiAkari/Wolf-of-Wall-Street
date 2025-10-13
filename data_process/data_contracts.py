@@ -3,12 +3,12 @@
 校验数据
 '''
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import pandera.pandas as pa
-from pandera.typing import Series
 from scipy.stats import ks_2samp
-from typing import List, Dict, Any
+from pandera.typing import Series
+from typing import Any, Dict, List
 
 # ===================================================================
 # 1. 自定义校验函数 (Custom Checks)

@@ -4,12 +4,10 @@
 '''
 import gc
 import sys
-import torch
-import joblib
 import pandas as pd
 from pathlib import Path
 from tqdm.autonotebook import tqdm
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 # --- 健壮的导入逻辑 ---
 try:
@@ -52,8 +50,11 @@ def run_training_for_ticker(
     force_retrain: bool = False, 
     keyword: str = None
 ) -> Optional[pd.DataFrame]:
+    """
+    (已重构) 接收预处理好的 folds 列表，执行训练，并生成 OOF 预测文件。
+    """
     display_name = keyword if keyword else ticker
-    print(f"--- 开始 {display_name} ({ticker}) 的模型训练: {model_type.upper()} ---")
+    print(f"\n" + "="*80); print(f"--- Starting {model_type.upper()} training for {display_name} ({ticker}) ---")
 
     model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / ticker
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -62,7 +63,7 @@ def run_training_for_ticker(
     
     existing_models = sorted(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
     if existing_models and not force_retrain:
-        print(f"INFO: {display_name} ({ticker}) 的最新模型已退出. 跳过.")
+        print(f"INFO: Latest model for {display_name} ({ticker}) already exists. Skipping.")
         ic_history_path = model_dir / f"{model_type}_ic_history.csv"
         if ic_history_path.exists(): return pd.read_csv(ic_history_path, index_col='date', parse_dates=True)
         return None
@@ -71,56 +72,53 @@ def run_training_for_ticker(
     builder = builder_map[model_type](config)
     
     all_fold_ics = []
-    
+    # --- 新增：初始化一个列表来收集 OOF 预测 ---
+    oof_predictions = []
+
     if not preprocessed_folds:
-        print(f"WARNNING: 没有为 {display_name} 提供的预处理 folds. 跳过验证.")
+        print(f"WARNNING: No pre-processed folds provided for {display_name}. Skipping validation.")
     else:
         print(f"INFO: Starting Walk-Forward validation for {display_name} across {len(preprocessed_folds)} folds...")
         fold_iterator = tqdm(preprocessed_folds, desc=f"Training {model_type.upper()} on {display_name}", leave=True)
         
         for fold_data in fold_iterator:
-            _, ic_series_fold = builder.train_and_evaluate_fold(
+            # --- 核心修正：接收所有三个返回值 ---
+            artifacts, ic_series_fold, oof_fold_df = builder.train_and_evaluate_fold(
                 train_df=None, val_df=None, cached_data=fold_data
             )
             
             if ic_series_fold is not None and not ic_series_fold.empty:
-                ic_series_fold['ticker'] = ticker; all_fold_ics.append(ic_series_fold)
+                ic_series_fold['ticker'] = ticker
+                all_fold_ics.append(ic_series_fold)
+            
+            # 将每个 fold 的 OOF 预测添加到列表中
+            if oof_fold_df is not None and not oof_fold_df.empty:
+                oof_predictions.append(oof_fold_df)
             
             gc.collect()
 
+    # --- 新增：在所有 folds 结束后，保存 OOF 文件 ---
+    if oof_predictions:
+        full_oof_df = pd.concat(oof_predictions).sort_values('date').drop_duplicates(subset=['date'])
+        oof_path = model_dir / f"{model_type}_oof_preds.csv"
+        try:
+            full_oof_df.to_csv(oof_path, index=False)
+            print(f"SUCCESS: Out-of-Fold predictions saved to {oof_path}")
+        except Exception as e:
+            print(f"ERROR: Failed to save Out-of-Fold predictions: {e}")
+    
     full_df = config.get('full_df_for_final_model')
     if full_df is None:
-        print("ERROR: 在最终训练的配置中未找到 full_df_for_final_model. 跳过.")
+        print("ERROR: full_df_for_final_model not found in config for final training. Skipping.")
     else:
-        print(f"INFO: 训练 {display_name} ({ticker}) 的最终模型...")
+        print(f"INFO: Training final model for {display_name} ({ticker}) on all data...")
         final_artifacts = builder.train_final_model(full_df)
-        
-        timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        model_file = model_dir / f"{model_type}_model_{timestamp}{model_suffix}"
-        scaler_file = model_dir / f"{model_type}_scaler_{timestamp}.pkl"
-
-        if model_type == 'lstm': torch.save(final_artifacts['model'].state_dict(), model_file)
-        else: joblib.dump(final_artifacts['models'], model_file)
-        joblib.dump(final_artifacts['scaler'], scaler_file)
-        print(f"SUCCESS: {display_name} 的新模型已保存: {model_file.name}")
-
-    # 6. 清理旧版本
-    num_to_keep = config.get('global_settings', {}).get('num_model_versions_to_keep', 3)
-    all_model_versions = sorted(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
-    if len(all_model_versions) > num_to_keep:
-        for old_model in all_model_versions[:-num_to_keep]:
-            old_model.unlink()
-            old_scaler_name = old_model.name.replace("model", "scaler").replace(model_suffix, ".pkl")
-            old_scaler_file = old_model.parent / old_scaler_name
-            if old_scaler_file.exists():
-                old_scaler_file.unlink()
-            print(f"INFO: 已清除旧的模型版本: {old_model.name}")
 
     if all_fold_ics:
         full_ic_history = pd.concat(all_fold_ics).sort_values('date').drop_duplicates('date')
         full_ic_history['model_type'] = model_type
         ic_history_path = model_dir / f"{model_type}_ic_history.csv"
-        full_ic_history.to_csv(ic_history_path)
+        full_ic_history.to_csv(ic_history_path, index=False) # 保存 IC 时也不需要索引
         return full_ic_history
         
     return pd.DataFrame()

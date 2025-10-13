@@ -3,7 +3,7 @@
 import warnings
 import pandas as pd
 import lightgbm as lgb
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, Tuple
 from lightgbm.callback import early_stopping
 from sklearn.preprocessing import StandardScaler
 
@@ -29,7 +29,7 @@ class LGBMBuilder:
         X = df_with_date[['date'] + features]; y = df[self.label_col]
         return X, y
 
-    def train_and_evaluate_fold(self, train_df: pd.DataFrame, val_df: pd.DataFrame, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame]:
+    def train_and_evaluate_fold(self, train_df: pd.DataFrame, val_df: pd.DataFrame, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
         if cached_data:
             X_train_scaled = cached_data['X_train_scaled']
             y_train = cached_data['y_train']
@@ -62,23 +62,29 @@ class LGBMBuilder:
                 )
             
             best_iteration = model.best_iteration_
-            if best_iteration:
+            if self.lgbm_params.get('verbose_period', -1) > 0 and best_iteration:
                 print(f"    - Quantile {q}: Finished. Best iter: [{best_iteration}]")
 
             quantile_models[f'q_{q}'] = model
         
         median_model = quantile_models.get(f'q_{0.5}')
-        daily_ic_df = pd.DataFrame()
+        ic_df = pd.DataFrame()
+        oof_df = pd.DataFrame() # <-- 初始化 OOF DataFrame
+
         if median_model and not y_val.empty and len(y_val) > 1:
             preds = median_model.predict(X_val_scaled)
-            eval_df = pd.DataFrame({"pred": preds, "y": y_val.values, "date": y_val.index})
+            eval_df = pd.DataFrame({"y_pred": preds, "y_true": y_val.values, "date": y_val.index})
+            
+            # 创建 OOF DataFrame
+            oof_df = eval_df[['date', 'y_true', 'y_pred']]
+
             try:
-                fold_ic = eval_df['pred'].rank().corr(eval_df['y'].rank(), method='spearman')
+                fold_ic = eval_df['y_pred'].rank().corr(eval_df['y_true'].rank(), method='spearman')
                 if pd.notna(fold_ic):
-                    daily_ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
+                    ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
             except Exception: pass
             
-        return {'models': quantile_models}, daily_ic_df
+        return {'models': quantile_models}, ic_df, oof_df
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
         X_full, y_full = self._extract_xy(full_df)

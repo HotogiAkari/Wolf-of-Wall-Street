@@ -2,13 +2,13 @@
 '''
 保存数据
 '''
+import sys
 import json
 import yaml
-import sys
-from typing import Dict, Any
-from pathlib import Path
-import pandas as pd
 import hashlib
+import pandas as pd
+from typing import Dict
+from pathlib import Path
 
 try:
     from data_process.get_data import process_all_from_config
