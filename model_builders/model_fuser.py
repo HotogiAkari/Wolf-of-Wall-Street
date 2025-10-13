@@ -3,12 +3,15 @@
 import json
 import joblib
 import random
+import inspect
 import datetime
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from scipy.stats import spearmanr
 from sklearn.metrics import make_scorer
 from sklearn.linear_model import Ridge
+from sklearn.linear_model import ElasticNet
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
@@ -16,14 +19,26 @@ from sklearn.model_selection import cross_val_score
 from typing import Dict, List, Optional, Union
 
 def spearman_corr_scorer(y_true, y_pred):
-    """自定义的 Spearman 相关系数评分函数，增加了对常量输入的保护。"""
-    y_true, y_pred = pd.Series(y_true), pd.Series(y_pred)
-    # 如果任一输入数组的值全部相同，方差为0，corr会返回NaN或报错
-    if y_true.var() < 1e-8 or y_pred.var() < 1e-8:
-        return 0.0 # 返回一个中性/差的分数
-    
-    correlation = y_true.corr(y_pred, method='spearman')
-    return correlation if pd.notna(correlation) else 0.0
+    """
+    使用 SciPy 计算 Spearman 相关系数，以忽略 Pandas 索引。
+    """
+    # 将输入转换为 NumPy 数组，确保没有索引
+    y_true_vals = np.asarray(y_true)
+    y_pred_vals = np.asarray(y_pred)
+    # 检查常量输入
+    if np.var(y_true_vals) < 1e-8:
+        return 0.0
+    if np.var(y_pred_vals) < 1e-8:
+        if 'ModelFuser' in str(inspect.stack()[1][0].f_locals.get('self', '')): # 仅在 Fuser 内部打印
+             print("  - DIAGNOSTIC (Scorer): y_pred is constant! Meta-model failed to learn. Returning 0.0")
+        return 0.0
+    try:
+        # spearmanr 返回 (correlation, p-value)
+        correlation, _ = spearmanr(y_true_vals, y_pred_vals)    
+        # 处理 SciPy 可能返回 NaN 的情况
+        return correlation if np.isfinite(correlation) else 0.0
+    except Exception:
+        return 0.0
 
 class ModelFuser:
     """
@@ -33,12 +48,10 @@ class ModelFuser:
     def __init__(self, ticker: str, config: Dict):
         self.ticker = ticker
         self.config = config
-        self.meta_model: Optional[Union[Ridge, MLPRegressor]] = None
+        self.meta_model: Optional[Union[Ridge, ElasticNet, MLPRegressor]] = None
         self.scaler: Optional[StandardScaler] = None
         self.is_trained = False
-        self.use_fallback = False # 标志位，用于判断是否应回退到简单融合策略
-
-        # 增强功能: 用于在线监控和实盘防抖动的历史记录
+        self.use_fallback = False
         self.online_ic_history: List[float] = []
         self.recent_preds: List[float] = []
 
@@ -49,28 +62,15 @@ class ModelFuser:
         self.scaler_path = self.model_dir / "fuser_scaler.pkl"
         self.meta_path = self.model_dir / "fuser_meta.json"
 
-        # --- 为增量训练准备 ---
-        # 如果模型不存在，我们会初始化一个新的、可以 partial_fit 的模型
         fuser_config = self.config.get('default_model_params', {}).get('fuser_params', {})
-        meta_model_type = fuser_config.get('type', 'ridge')
-        
-        # 确保 Ridge 支持增量训练
-        if meta_model_type == 'ridge':
-             # 我们使用 SGDRegressor 来实现增量 Ridge，它更适合在线学习
-             from sklearn.linear_model import SGDRegressor
-             # 'l2' penalty 就是 Ridge 回归
-             self.meta_model = SGDRegressor(penalty='l2', alpha=fuser_config.get('alpha', 0.0001), max_iter=1000, tol=1e-3, random_state=config.get('global_settings',{}).get('seed',42))
-        elif meta_model_type == 'mlp':
-             # MLPRegressor 也支持 partial_fit
-             self.meta_model = MLPRegressor(hidden_layer_sizes=(8,), random_state=config.get('global_settings',{}).get('seed',42), warm_start=True)
-        else:
-            raise TypeError(f"不支持的元模型类型: {meta_model_type}")
+        self.verbose = fuser_config.get('verbose', True)
 
+        # 将 scaler 的初始化也放在这里
         self.scaler = StandardScaler()
-        # 高优先级 (2): 增强随机数控制，确保可复现性
+
+        # 随机种子设置
         seed = self.config.get('global_settings', {}).get('seed', 42)
-        np.random.seed(seed)
-        random.seed(seed)
+        np.random.seed(seed); random.seed(seed)
         # 如果未来使用 PyTorch 作为元模型，也应在此处设置:
         # try:
         #     import torch
@@ -102,72 +102,83 @@ class ModelFuser:
         return all_oof_preds
 
     def train(self):
-        """执行完整的、健壮的融合模型训练流程。"""
-        print(f"\n--- 正在为 {self.ticker} 训练融合元模型... ---")
+        if self.verbose: print(f"\n--- 正在为 {self.ticker} 训练融合元模型... ---")
         
         all_oof_preds = self._get_oof_predictions()
-        oof_lgbm_path = self.model_dir / "lgbm_oof_preds.csv" # 假设 lgbm 必须存在以获取 y_true
+        oof_lgbm_path = self.model_dir / "lgbm_oof_preds.csv"
         if not oof_lgbm_path.exists() or all_oof_preds is None:
-            print("ERROR: 基础模型的 OOF 预测不完整，无法训练融合模型。"); return
+            if self.verbose: print("ERROR: 基础模型的 OOF 预测不完整。")
+            return
 
         y_true_df = pd.read_csv(oof_lgbm_path, parse_dates=['date']).set_index('date')[['y_true']]
         aligned_data = all_oof_preds.join(y_true_df, how='inner').dropna()
         
         if len(aligned_data) < 50:
-             print(f"WARNNING: 对齐后的样本量过少 ({len(aligned_data)} < 50)，跳过融合模型训练。"); return
+            if self.verbose: print(f"WARNNING: 对齐样本量过少 ({len(aligned_data)} < 50)。")
+            return
 
         pred_cols = [c for c in aligned_data.columns if c.startswith('pred_')]
         X_meta = aligned_data[pred_cols]
         y_meta = aligned_data['y_true']
 
         if X_meta.var().min() < 1e-8:
-            print("WARNING: 元模型输入特征方差过小（预测值恒定），跳过训练。"); return
+            if self.verbose: print("WARNING: 元模型输入特征方差过小。")
+            return
 
-        self.scaler = StandardScaler(); X_meta_scaled = self.scaler.fit_transform(X_meta)
+        X_meta_scaled = self.scaler.fit_transform(X_meta)
         
-        n_splits = min(5, max(2, len(X_meta) // 100)); tscv = TimeSeriesSplit(n_splits=n_splits)
-        print(f"INFO: 样本量为 {len(X_meta)}，自动选择 {n_splits} 折交叉验证。")
+        n_splits = min(5, max(2, len(X_meta) // 100))
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        if self.verbose: print(f"INFO: 样本量 {len(X_meta)}，自动选择 {n_splits} 折交叉验证。")
 
         fuser_config = self.config.get('default_model_params', {}).get('fuser_params', {})
-        meta_model_type = fuser_config.get('type', 'ridge')
+        meta_model_type = fuser_config.get('type', 'elastic_net')
         
+        # 根据类型，创建一个用于交叉验证的临时模型实例
         if meta_model_type == 'mlp':
-            print("INFO: 使用 MLPRegressor 作为元模型。")
+            if self.verbose: print("INFO: 使用 MLPRegressor 作为元模型。")
             meta_model_cv = MLPRegressor(hidden_layer_sizes=(8,), max_iter=500, random_state=self.config.get('global_settings',{}).get('seed',42))
-        else:
-            print("INFO: 使用 Ridge 作为元模型。")
+        elif meta_model_type == 'ridge':
+            if self.verbose: print("INFO: 使用 Ridge 作为元模型。")
             meta_model_cv = Ridge(alpha=fuser_config.get('alpha', 1.0))
+        else: # 默认是 elastic_net
+            if self.verbose: print("INFO: 使用 ElasticNet 作为元模型。")
+            alpha = fuser_config.get('alpha', 0.1)
+            l1_ratio = fuser_config.get('l1_ratio', 0.5)
+            meta_model_cv = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=self.config.get('global_settings',{}).get('seed',42))
 
         scorer = make_scorer(spearman_corr_scorer)
         cv_scores = cross_val_score(meta_model_cv, X_meta_scaled, y_meta, cv=tscv, scoring=scorer)
         mean_cv_ic, std_cv_ic = np.mean(cv_scores), np.std(cv_scores)
         
-        print(f"  - 交叉验证 IC 分数: {[f'{s:.4f}' for s in cv_scores]}, 平均值: {mean_cv_ic:.4f}")
+        if self.verbose:
+            print(f"  - 交叉验证 IC 分数: {[f'{s:.4f}' for s in cv_scores]}, 平均值: {mean_cv_ic:.4f}")
         
         ic_stability_score = std_cv_ic / (abs(mean_cv_ic) + 1e-8)
-        print(f"  - IC 稳定性分数 (变异系数): {ic_stability_score:.4f}")
+        if self.verbose: print(f"  - IC 稳定性分数: {ic_stability_score:.4f}")
         
         stability_threshold = fuser_config.get('stability_threshold', 0.5)
         if ic_stability_score > stability_threshold:
-            print(f"WARNNING: 模型稳定性差 ({ic_stability_score:.4f} > {stability_threshold})。将回退到简单加权策略。")
+            if self.verbose: print(f"WARNNING: 模型稳定性差 ({ic_stability_score:.4f} > {stability_threshold})。将回退。")
             self.use_fallback = True; return
 
+        # 使用与交叉验证时相同的模型和参数，在全部 OOF 数据上训练最终的元模型
         self.meta_model = meta_model_cv.fit(X_meta_scaled, y_meta)
         y_pred_meta = self.meta_model.predict(X_meta_scaled)
         
-        ic_fuser = spearman_corr_scorer(y_meta, y_pred_meta)
-        base_ics = {col: spearman_corr_scorer(y_meta, X_meta[col]) for col in pred_cols}
+        ic_fuser = spearman_corr_scorer(y_true=y_meta, y_pred=y_pred_meta)
+        base_ics = {col: spearman_corr_scorer(y_true=y_meta, y_pred=X_meta[col]) for col in pred_cols}
 
-        print("\n--- 训练后性能评估 ---")
-        print(f"  - 融合模型 IC: {ic_fuser:.4f}")
-        for model_name, ic_val in base_ics.items():
-            print(f"  - {model_name.replace('pred_', '').upper()} 单独 IC: {ic_val:.4f}")
+        if self.verbose:
+            print("\n--- 训练后性能评估 ---")
+            print(f"  - 融合模型 IC: {ic_fuser:.4f}")
+            for model_name, ic_val in base_ics.items():
+                print(f"  - {model_name.replace('pred_', '').upper()} 单独 IC: {ic_val:.4f}")
 
         if ic_fuser < max(base_ics.values()):
-            print("WARNNING: 融合模型性能未超越最佳单一模型。将回退到简单加权策略。")
+            if self.verbose: print("WARNNING: 融合模型性能未超越最佳单一模型。将回退。")
             self.use_fallback = True; return
 
-        # 高优先级 (1): 保存模型元信息
         meta_info = {
             "ticker": self.ticker,
             "trained_at": datetime.datetime.now().isoformat(),
@@ -213,7 +224,6 @@ class ModelFuser:
             try:
                 self.meta_model = joblib.load(self.fuser_path)
                 self.scaler = joblib.load(self.scaler_path)
-                # ... (加载验证)
                 self.is_trained = True
                 if self.verbose: print(f"SUCCESS: 融合构件已加载。")
                 return True
