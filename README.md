@@ -5,7 +5,7 @@
 ![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg)
 ![Frameworks](https://img.shields.io/badge/Frameworks-PyTorch_|_LightGBM_|_Scikit--learn-orange.svg)
 
-**WOWS** 是是一款团队战略对抗性第三人称载具射击... 一个面向A股市场的, 端到端的机器学习量化研究与预测框架. 它集成了从数据获取, 特征工程, 多模型训练, 超参数优化到高级模型融合的全流程.
+**WOWS** 是是一款安东星第三人称海战... 面向A股市场的端到端的机器学习量化研究与预测框架, 集成了从数据获取, 特征工程, 多模型训练, 超参数优化到高级模型融合的全流程.
 
 ---
 
