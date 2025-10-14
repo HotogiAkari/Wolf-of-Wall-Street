@@ -68,27 +68,23 @@ class LSTMBuilder:
         return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32), np.array(dates)
 
     def train_and_evaluate_fold(self, train_df: pd.DataFrame = None, val_df: pd.DataFrame = None, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
-        """
-        (已重构) 接收预处理好的 Tensors，执行模型训练和评估，并返回 3 个值。
-        """
-        if not cached_data: raise ValueError("train_and_evaluate_fold now requires 'cached_data'.")
+        if not cached_data:
+            raise ValueError("'cached_data' is required for this method.")
 
-        # --- 从缓存中获取 Tensors ---
-        X_train_tensor = cached_data['X_train_tensor'].to(self.device)
-        y_train_tensor = cached_data['y_train_tensor'].to(self.device)
-        X_val_tensor = cached_data['X_val_tensor'].to(self.device)
-        y_val_tensor = cached_data['y_val_tensor'].to(self.device)
+        X_train_tensor = cached_data['X_train_tensor']
+        y_train_tensor = cached_data['y_train_tensor']
+        X_val_tensor = cached_data['X_val_tensor']
+        y_val_tensor = cached_data['y_val_tensor']
         y_val_seq = cached_data['y_val_seq']
         dates_val_seq = cached_data['dates_val_seq']
 
         if X_train_tensor.shape[0] == 0 or X_val_tensor.shape[0] == 0:
-            # 确保即使提前退出，也返回 3 个值
             return {'model_state_dict': None}, pd.DataFrame(), pd.DataFrame()
 
         p = self.lstm_params
-        batch_size = p.get('batch_size', 32)    # 默认 batch 大小为32
-        num_workers = p.get('num_workers', 0)   # 默认为 0，保证在未配置时也能安全运行
-        if num_workers > 0:
+        batch_size = p.get('batch_size', 128)
+        num_workers = p.get('num_workers', 0)
+        if self.verbose and num_workers > 0:
             print(f"INFO: DataLoader will use {num_workers} parallel workers.")
 
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
@@ -124,19 +120,19 @@ class LSTMBuilder:
         for epoch in epoch_iterator:
             model.train()
             for X_batch, y_batch in train_loader:
+                # --- 核心修正 2：在训练循环内部，将每个 batch 移至 GPU ---
+                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
+                
                 optimizer.zero_grad(set_to_none=True)
                 with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=(self.device == 'cuda')):
-                    outputs = model(X_batch)
-                    loss = criterion(outputs, y_batch)
-                scaler_amp.scale(loss).backward()
-                scaler_amp.step(optimizer)
-                scaler_amp.update()
+                    outputs = model(X_batch); loss = criterion(outputs, y_batch)
+                scaler_amp.scale(loss).backward(); scaler_amp.step(optimizer); scaler_amp.update()
             
             model.eval()
             with torch.no_grad():
-                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=(self.device == 'cuda')):
-                    val_outputs = model(X_val_tensor)
-                    val_loss = criterion(val_outputs, y_val_tensor)
+                # --- 核心修正 3：在验证前，将整个验证集一次性移至 GPU ---
+                val_outputs = model(X_val_tensor.to(self.device))
+                val_loss = criterion(val_outputs, y_val_tensor.to(self.device))
             
             scheduler.step(val_loss)
             
@@ -147,13 +143,8 @@ class LSTMBuilder:
                 patience_counter += 1
             
             if verbose_period > 0 and (epoch + 1) % verbose_period == 0:
-                # 动态更新前面的描述
                 epoch_iterator.set_description(f"    - Epochs {epoch + 1}")
-                # 更新后面的附加信息
-                epoch_iterator.set_postfix(
-                    total_epochs=epochs, 
-                    best_val_loss=f"{best_val_loss:.6f}"
-                )
+                epoch_iterator.set_postfix(total_epochs=epochs, best_val_loss=f"{best_val_loss:.6f}")
 
             if patience_counter >= patience: break
         
@@ -186,7 +177,6 @@ class LSTMBuilder:
         gc.collect()
         if self.device == 'cuda': torch.cuda.empty_cache()
             
-        # --- 核心修正 2：确保总是返回 3 个元素的元组 ---
         return {'model_state_dict': best_model_state}, ic_df, oof_df
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:

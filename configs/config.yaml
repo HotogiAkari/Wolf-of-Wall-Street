@@ -4,7 +4,7 @@
 # --- 1. 全局设定 ---
 # 这部分参数定义了项目的基本环境和全局行为. 
 global_settings:
-  seed: 42                      # 全局随机种子. 用于保证所有涉及随机性的操作（如模型训练, 数据采样）的结果都可以被复现. 
+  seed: 64                      # 全局随机种子. 用于保证所有涉及随机性的操作（如模型训练, 数据采样）的结果都可以被复现. 
   device: 'gpu'                 # 默认计算设备. 'gpu' 会优先使用 CUDA，如果不可用则自动切换到 'cpu'. 'cpu' 则强制使用 CPU. 
   model_dir: 'models'           # 存放所有已训练模型, scaler 和 IC 历史记录的主目录. 
   data_cache_dir: 'data/data_cache'  # 用于缓存从 API 下载的原始数据的目录，避免重复下载，加快后续运行速度. 
@@ -123,20 +123,20 @@ strategy_config:
 # --- 3. HPO (超参数优化) 设定 ---
 hpo_config:
   # 全局 HPO 设置 (作为回退的默认值)
-  n_trials: 50                  # 全局默认的试验次数. 
+  n_trials: 20                  # 全局默认的试验次数. 
   hpo_num_eval_folds: 2         # 全局默认的 HPO 内部评估验证集数量. 
   tickers_for_hpo: ['600519.SH', '000001.SZ'] # 指定一个股票子集来运行 HPO. 
   
   # --- LGBM 专属 HPO 配置 ---
   lgbm_hpo_config:
-    n_trials: 50                # [整数] 覆盖全局设置，为 LGBM 设置 50 轮试验. 
+    n_trials: 40                # [整数] 覆盖全局设置，为 LGBM 设置 n 轮试验. 
     hpo_num_eval_folds: 2       # [整数] LGBM 在 HPO 内部评估时使用的 folds 数. 
     
     # HPO 流程中，LGBM 使用的【固定】参数. 这些参数不参与搜索，但会覆盖 default_model_params 中的同名参数. 
     params:
       n_jobs: 8                   # [整数] HPO 期间限制 CPU 核心数
       verbose: -1                 # [整数] 设为 -1，彻底关闭 LightGBM 的 C++ 内核日志. 
-      early_stopping_rounds: 50   # [整数] HPO 期间使用更短的早停轮次 (50)，加速搜索. 
+      early_stopping_rounds: 15   # [整数] HPO 期间使用更短的早停轮次，加速搜索. 
       verbose_period: 0           # [整数] HPO 期间关闭 Python 回调函数的迭代日志 (设为 0 或 -1). 
       
     # LGBM 的超参数【搜索空间】. 
@@ -153,13 +153,13 @@ hpo_config:
   
   # --- LSTM 专属 HPO 配置 ---
   lstm_hpo_config:
-    n_trials: 40                # [整数] 为 LSTM 设置较少的试验次数（例如 20），因为它训练速度慢. 
-    hpo_num_eval_folds: 3       # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以进一步加速. 
+    n_trials: 10                # [整数] 为 LSTM 设置较少的试验次数（例如 20），因为它训练速度慢. 
+    hpo_num_eval_folds: 2       # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以进一步加速. 
     
     # HPO 流程中，LSTM 使用的【固定】参数. 
     params:
       verbose_period: 0           # [整数] HPO 期间关闭 Epoch 日志. 
-      early_stopping_rounds_lstm: 30 # [整数] HPO 期间使用更激进的早停轮次 (30). 
+      early_stopping_rounds_lstm: 5 # [整数] HPO 期间使用更激进的早停轮次 (30). 
       
     # LSTM 的超参数【搜索空间】. 
     # 格式: [类型, ...]. 
@@ -184,7 +184,7 @@ default_model_params:
     n_jobs: 8                   # 限制 CPU 核心数为 8
     verbose: -1                 # 控制 C++ 内核日志
     verbose_period: 100000      # 表示主训练时，每 n 轮打印一次验证集损失
-    n_estimators: 200000           # 树的最大数量. 通常设置一个很大的值，由早停法来决定最佳数量. 
+    n_estimators: 20000           # 树的最大数量. 通常设置一个很大的值，由早停法来决定最佳数量. 
     feature_fraction: 0.8005786090055831       # 每次迭代时，随机选择 80% 的特征来建树. 用于防止过拟合. 
     learning_rate: 0.030297480627572117        # 学习率或步长. 较小的值需要更多的树，但通常能达到更好的效果. 
     min_child_samples: 49       # 一个叶子节点上所需的最少样本数. 用于防止过拟合. 
@@ -193,7 +193,7 @@ default_model_params:
     reg_lambda: 2.027927483904424            # L2 正则化. 
     bagging_fraction: 0.8       # 每次迭代时，随机选择 80% 的数据来建树（行采样）. 用于防止过拟合. 
     bagging_freq: 1             # 每 1 次迭代执行一次 bagging. 
-    early_stopping_rounds: 50000 # 早停法. 如果在验证集上的表现连续 N 轮没有提升，则停止训练. 
+    early_stopping_rounds: 5000 # 早停法. 如果在验证集上的表现连续 N 轮没有提升，则停止训练. 
   
   lstm_params:
     num_workers: 8              # DataLoader 使用的并行加载进程数 (使用核心数), 设为 0 表示只使用主进程加载（速度慢）

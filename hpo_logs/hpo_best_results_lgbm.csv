@@ -1,0 +1,2 @@
+ticker,keyword,best_score,num_leaves,learning_rate,min_child_samples,feature_fraction,bagging_fraction,reg_alpha,reg_lambda
+000001.SZ,平安银行,16.823444770453168,46,0.03398934028375205,48,0.8557098002104488,0.7786281281246216,0.3933724101245571,0.11904422225389946
