@@ -153,8 +153,8 @@ hpo_config:
   
   # --- LSTM 专属 HPO 配置 ---
   lstm_hpo_config:
-    n_trials: 20                # [整数] 为 LSTM 设置较少的试验次数（例如 20），因为它训练速度慢. 
-    hpo_num_eval_folds: 2       # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以进一步加速. 
+    n_trials: 40                # [整数] 为 LSTM 设置较少的试验次数（例如 20），因为它训练速度慢. 
+    hpo_num_eval_folds: 3       # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以进一步加速. 
     
     # HPO 流程中，LSTM 使用的【固定】参数. 
     params:
@@ -184,7 +184,7 @@ default_model_params:
     n_jobs: 8                   # 限制 CPU 核心数为 8
     verbose: -1                 # 控制 C++ 内核日志
     verbose_period: 100000      # 表示主训练时，每 n 轮打印一次验证集损失
-    n_estimators: 200           # 树的最大数量. 通常设置一个很大的值，由早停法来决定最佳数量. 
+    n_estimators: 200000           # 树的最大数量. 通常设置一个很大的值，由早停法来决定最佳数量. 
     feature_fraction: 0.8005786090055831       # 每次迭代时，随机选择 80% 的特征来建树. 用于防止过拟合. 
     learning_rate: 0.030297480627572117        # 学习率或步长. 较小的值需要更多的树，但通常能达到更好的效果. 
     min_child_samples: 49       # 一个叶子节点上所需的最少样本数. 用于防止过拟合. 
@@ -193,13 +193,13 @@ default_model_params:
     reg_lambda: 2.027927483904424            # L2 正则化. 
     bagging_fraction: 0.8       # 每次迭代时，随机选择 80% 的数据来建树（行采样）. 用于防止过拟合. 
     bagging_freq: 1             # 每 1 次迭代执行一次 bagging. 
-    early_stopping_rounds: 5000 # 早停法. 如果在验证集上的表现连续 N 轮没有提升，则停止训练. 
+    early_stopping_rounds: 50000 # 早停法. 如果在验证集上的表现连续 N 轮没有提升，则停止训练. 
   
   lstm_params:
-    num_workers: 4              # DataLoader 使用的并行加载进程数 (使用核心数), 设为 0 表示只使用主进程加载（速度慢）
-    verbose_period: 500         # 表示主训练时，每 n 轮打印一次验证集损失
+    num_workers: 8              # DataLoader 使用的并行加载进程数 (使用核心数), 设为 0 表示只使用主进程加载（速度慢）
+    verbose_period: 5000         # 表示主训练时，每 n 轮打印一次验证集损失
     sequence_length: 90         # 输入 LSTM 模型的时间序列长度（即用过去 N 天的数据来预测未来）. 
-    epochs: 200                 # 最大的训练轮次. 通常由早停法提前终止. 
+    epochs: 2000                 # 最大的训练轮次. 通常由早停法提前终止. 
     batch_size: 128             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
     learning_rate: 0.001        # 优化器（如 Adam）的学习率. 
     units_1: 64                 # LSTM 第一个隐藏层的神经元数量. 
@@ -219,9 +219,6 @@ default_model_params:
 # --- 5. 股票池与个股专属配置 ---
 # 定义要处理的所有股票. 每个条目都可以选择性地覆盖上面的任何默认参数. 
 stocks_to_process:
-  - ticker: '600519.SH'
-    keyword: '贵州茅台'
-    industry_etf: '159928.SZ'
 
   - ticker: '000001.SZ'
     keyword: '平安银行'
@@ -230,15 +227,6 @@ stocks_to_process:
     lgbm_params:
       num_leaves: 7
       min_child_samples: 30
-
-  - ticker: '688256.SH'
-    keyword: '寒武纪-U'
-    industry_etf: '159995.SZ'
-    # 为寒武纪定制更长的 LSTM 序列和更复杂的网络 (覆盖默认参数)
-    lstm_params:
-      sequence_length: 90
-      units_1: 128
-      units_2: 64
 
   - ticker: '601606.SH'
     keyword: '长城军工'
@@ -255,3 +243,39 @@ stocks_to_process:
   - ticker: '000100.SZ'
     keyword: 'TCL科技'
     industry_etf: '159928.SZ'
+  
+  - ticker: '000426.SZ'
+    keyword: '兴业矿业'
+    industry_etf: '159915.SZ'   # 有色金属 / 矿业 ETF 示例
+
+  - ticker: '002083.SZ'
+    keyword: '孚日股份'
+    industry_etf: '159825.SZ'   # 中证全指轻工制造ETF，可代表家纺与轻工产业
+
+  - ticker: '000150.SZ'
+    keyword: '宜华健康'
+    industry_etf: '512170.SH'   # 医疗ETF，对应医药与健康服务行业
+
+  - ticker: '300013.SZ'
+    keyword: '新宁物流'
+    industry_etf: '159928.SZ'   # 物流相关可用中证物流主题ETF或沪深300代表
+
+  - ticker: '300242.SZ'
+    keyword: '佳云科技'
+    industry_etf: '159939.SZ'   # 互联网ETF，因佳云主营为互联网营销业务
+
+  - ticker: '600301.SH'
+    keyword: 'ST南化'
+    industry_etf: '512690.SH'   # 化工ETF
+
+  - ticker: '002006.SZ'
+    keyword: '精功科技'
+    industry_etf: '512480.SH'   # 机械装备制造ETF
+  
+  - ticker: '300242.SZ'
+    keyword: '佳云科技'
+    industry_etf: '159939.SZ'   # 科技 / 互联网 ETF 示例
+  
+  - ticker: '002129.SZ'
+    keyword: 'TCL中环'
+    industry_etf: '159927.SZ'   # 光伏 / 晶圆 / 半导体行业 ETF 示例
