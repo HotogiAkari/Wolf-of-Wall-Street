@@ -20,6 +20,8 @@
     ```
 
 2.  **创建虚拟环境** (推荐)
+   
+    该项目是在 Python `3.13.0` 版本下编写的.
     ```bash
     python -m venv .venv
     # Windows
