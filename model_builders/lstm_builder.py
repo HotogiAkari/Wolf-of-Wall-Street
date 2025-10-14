@@ -40,14 +40,16 @@ class LSTMBuilder:
         global_cfg = config.get('global_settings', {})
         
         default_params = config.get('default_model_params', {}).get('lstm_params', {})
-        hpo_params = config.get('hpo_config', {}).get('lstm_hpo_params', {}) # 为未来 HPO 预留
-        
+        hpo_params = config.get('hpo_config', {}).get('lstm_hpo_config', {}).get('params', {})
+    
         self.lstm_params = {**default_params, **hpo_params}
-        
         self.sequence_length = self.lstm_params.get('sequence_length', 60)
         self.label_col = global_cfg.get('label_column', 'label_return')
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"INFO: PyTorch LSTMBuilder will use device: {self.device.upper()}")
+
+        self.verbose_period = self.lstm_params.get('verbose_period', 5)
+        self.verbose = self.verbose_period > 0
+        if self.verbose: print(f"INFO: PyTorch LSTMBuilder will use device: {self.device.upper()}")
 
     def _create_sequences(self, df: pd.DataFrame, feature_cols: list) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(公共辅助函数) 使用滑动窗口，将DataFrame转换为序列。现在由 Notebook 调用。"""
@@ -71,6 +73,7 @@ class LSTMBuilder:
         if not cached_data:
             raise ValueError("'cached_data' is required for this method.")
 
+        # 保持数据在 CPU，以便 DataLoader 正确工作
         X_train_tensor = cached_data['X_train_tensor']
         y_train_tensor = cached_data['y_train_tensor']
         X_val_tensor = cached_data['X_val_tensor']
@@ -84,6 +87,7 @@ class LSTMBuilder:
         p = self.lstm_params
         batch_size = p.get('batch_size', 128)
         num_workers = p.get('num_workers', 0)
+        
         if self.verbose and num_workers > 0:
             print(f"INFO: DataLoader will use {num_workers} parallel workers.")
 
@@ -92,9 +96,9 @@ class LSTMBuilder:
             train_dataset, 
             batch_size=batch_size, 
             shuffle=True,
-            num_workers=num_workers,  # <--- 启用并行数据加载
-            pin_memory=True,          # <--- 启用内存锁定以加速传输
-            drop_last=True            # (可选) 如果最后一个 batch 不完整，则丢弃，可以稳定训练
+            num_workers=num_workers, 
+            pin_memory=True,            # 是否将数据加载到Pinned Memory中
+            drop_last=True              # 丢弃不完整的最后的批次
         )
         
         model = LSTMModel(
@@ -106,23 +110,20 @@ class LSTMBuilder:
         
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
-        
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
         scaler_amp = torch.amp.GradScaler(enabled=(self.device == 'cuda'))
 
         best_val_loss, patience_counter, best_model_state = float('inf'), 0, None
         patience = p.get('early_stopping_rounds_lstm', 50)
         epochs = p.get('epochs', 100)
-        verbose_period = p.get('verbose_period', 5)
+        verbose_period = self.lstm_params.get('verbose_period', 5)
         
-        epoch_iterator = tqdm(range(epochs), desc="    - Epochs", leave=False)
+        epoch_iterator = tqdm(range(epochs), desc="    - Epochs", leave=False, disable=not self.verbose)
         
         for epoch in epoch_iterator:
             model.train()
             for X_batch, y_batch in train_loader:
-                # --- 核心修正 2：在训练循环内部，将每个 batch 移至 GPU ---
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
-                
                 optimizer.zero_grad(set_to_none=True)
                 with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=(self.device == 'cuda')):
                     outputs = model(X_batch); loss = criterion(outputs, y_batch)
@@ -130,7 +131,7 @@ class LSTMBuilder:
             
             model.eval()
             with torch.no_grad():
-                # --- 核心修正 3：在验证前，将整个验证集一次性移至 GPU ---
+                # 验证数据移至 GPU
                 val_outputs = model(X_val_tensor.to(self.device))
                 val_loss = criterion(val_outputs, y_val_tensor.to(self.device))
             
@@ -142,25 +143,24 @@ class LSTMBuilder:
             else:
                 patience_counter += 1
             
-            if verbose_period > 0 and (epoch + 1) % verbose_period == 0:
+            if self.verbose and (epoch + 1) % verbose_period == 0:
                 epoch_iterator.set_description(f"    - Epochs {epoch + 1}")
                 epoch_iterator.set_postfix(total_epochs=epochs, best_val_loss=f"{best_val_loss:.6f}")
 
             if patience_counter >= patience: break
         
-        # print(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
+        if self.verbose:
+            print(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
 
-        ic_df = pd.DataFrame()
-        oof_df = pd.DataFrame()
-
+        ic_df, oof_df = pd.DataFrame(), pd.DataFrame()
         if X_val_tensor.shape[0] > 0 and best_model_state:
             model.load_state_dict(best_model_state)
             model.eval()
             with torch.no_grad():
-                preds = model(X_val_tensor).cpu().numpy().flatten()
+                # --- 核心修正：在这里也必须将数据移至 GPU ---
+                preds = model(X_val_tensor.to(self.device)).cpu().numpy().flatten()
             
             eval_df = pd.DataFrame({'y_pred': preds, 'y_true': y_val_seq, 'date': pd.to_datetime(dates_val_seq)})
-            
             oof_df = eval_df[['date', 'y_true', 'y_pred']]
             
             with warnings.catch_warnings():
