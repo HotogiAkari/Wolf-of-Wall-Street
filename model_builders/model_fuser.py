@@ -79,35 +79,35 @@ class ModelFuser:
         #     pass
 
     def _get_oof_predictions(self) -> Optional[pd.DataFrame]:
-        """加载并合并所有基础模型的 OOF (Out-of-Fold) 真实预测数据。"""
         oof_dfs = []
-        models_to_fuse = self.config.get('global_settings', {}).get('models_to_train', ['lgbm', 'lstm'])
-
-        for model_type in models_to_fuse:
-            oof_path = self.model_dir / f"{model_type}_oof_preds.csv"
-            if not oof_path.exists():
-                print(f"WARNNING: 未找到 {model_type} 的 OOF 预测文件: {oof_path}。")
-                return None
+        model_dir = Path(self.config.get('global_settings', {}).get('model_dir', 'models')) / self.ticker
+        
+        oof_files = list(model_dir.glob("*_oof_preds.csv"))
+        if len(oof_files) < 1: # 至少需要一个模型
+            if self.verbose: print(f"WARNNING: 未找到任何 OOF 预测文件。")
+            return None
             
+        for oof_path in oof_files:
+            model_type = oof_path.name.replace('_oof_preds.csv', '')
             df = pd.read_csv(oof_path, parse_dates=['date'])
             oof_dfs.append(df.set_index('date')[['y_pred']].rename(columns={'y_pred': f'pred_{model_type}'}))
         
         if not oof_dfs: return None
         
-        all_oof_preds = pd.concat(oof_dfs, axis=1).dropna()
-        if all_oof_preds.empty:
-            print("ERROR: 无法对齐所有模型的 OOF 数据（没有重叠的有效预测日期）。")
-            return None
-            
+        all_oof_preds = pd.concat(oof_dfs, axis=1) 
         return all_oof_preds
 
     def train(self):
         if self.verbose: print(f"\n--- 正在为 {self.ticker} 训练融合元模型... ---")
         
         all_oof_preds = self._get_oof_predictions()
+        if all_oof_preds is None or all_oof_preds.shape[1] < 2:
+            if self.verbose: print("INFO: 只有一个或更少的基础模型提供了 OOF 预测，无法训练融合模型。")
+            self.use_fallback = True; return # 直接进入回退模式
+
         oof_lgbm_path = self.model_dir / "lgbm_oof_preds.csv"
-        if not oof_lgbm_path.exists() or all_oof_preds is None:
-            if self.verbose: print("ERROR: 基础模型的 OOF 预测不完整。")
+        if not oof_lgbm_path.exists():
+            if self.verbose: print("ERROR: 找不到 lgbm_oof_preds.csv 文件以获取真实标签。")
             return
 
         y_true_df = pd.read_csv(oof_lgbm_path, parse_dates=['date']).set_index('date')[['y_true']]
@@ -124,7 +124,8 @@ class ModelFuser:
         if X_meta.var().min() < 1e-8:
             if self.verbose: print("WARNING: 元模型输入特征方差过小。")
             return
-
+        
+        self.scaler = StandardScaler()
         X_meta_scaled = self.scaler.fit_transform(X_meta)
         
         n_splits = min(5, max(2, len(X_meta) // 100))
@@ -239,6 +240,10 @@ class ModelFuser:
 
     def predict(self, preds: Dict[str, float]) -> float:
         """对一组新的基础模型预测进行融合，包含平滑和边界保护。"""
+        # 如果只有一个模型提供了预测，直接返回该预测值
+        if len(preds) == 1:
+            if self.verbose: print("INFO: 只提供了一个基础模型预测，直接使用该预测。")
+            return list(preds.values())[0]
         if not self.is_trained or self.use_fallback:
             print("WARNNING: 融合模型不可用或不稳定，回退到简单平均融合。")
             return np.mean(list(preds.values()))

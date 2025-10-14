@@ -1,6 +1,6 @@
 # 文件路径: model_builders/lstm_builder.py
 '''
-LSTM模型构建 (已修正数据泄露问题)
+LSTM模型构建
 '''
 
 import gc
@@ -111,7 +111,15 @@ class LSTMBuilder:
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
-        scaler_amp = torch.amp.GradScaler(enabled=(self.device == 'cuda'))
+        
+        # 根据 precision 决定是否启用 AMP
+        precision = p.get('precision', 32)
+        use_amp = (precision == 16) and (self.device == 'cuda')
+        if self.verbose and use_amp:
+            print("INFO: Automatic Mixed Precision (AMP) is ENABLED (float16).")
+        elif self.verbose:
+            print("INFO: Automatic Mixed Precision (AMP) is DISABLED (float32).")
+        scaler_amp = torch.amp.GradScaler(enabled=use_amp)
 
         best_val_loss, patience_counter, best_model_state = float('inf'), 0, None
         patience = p.get('early_stopping_rounds_lstm', 50)
@@ -125,9 +133,15 @@ class LSTMBuilder:
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=(self.device == 'cuda')):
-                    outputs = model(X_batch); loss = criterion(outputs, y_batch)
-                scaler_amp.scale(loss).backward(); scaler_amp.step(optimizer); scaler_amp.update()
+                # 根据 use_amp 控制 autocast
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
+                    outputs = model(X_batch)
+                    loss = criterion(outputs, y_batch)
+                
+                # GradScaler 在 enabled=False 时，scale/step/update 都是空操作
+                scaler_amp.scale(loss).backward()
+                scaler_amp.step(optimizer)
+                scaler_amp.update()
             
             model.eval()
             with torch.no_grad():
@@ -157,7 +171,6 @@ class LSTMBuilder:
             model.load_state_dict(best_model_state)
             model.eval()
             with torch.no_grad():
-                # --- 核心修正：在这里也必须将数据移至 GPU ---
                 preds = model(X_val_tensor.to(self.device)).cpu().numpy().flatten()
             
             eval_df = pd.DataFrame({'y_pred': preds, 'y_true': y_val_seq, 'date': pd.to_datetime(dates_val_seq)})
