@@ -193,13 +193,13 @@ class LSTMBuilder:
         return {'model_state_dict': best_model_state}, ic_df, oof_df
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
-        """在全部数据上训练最终模型 (此函数保持独立，不使用缓存)。"""
+        """在全部数据上训练最终模型"""
         label_col = self.label_col
         features = [col for col in full_df.columns if col != label_col]
         
         final_scaler = StandardScaler()
         full_df_scaled = full_df.copy()
-        full_df_scaled.index.name = 'date' # 确保索引有名字
+        full_df_scaled.index.name = 'date'
         full_df_scaled[features] = final_scaler.fit_transform(full_df[features])
 
         X_full, y_full, _ = self._create_sequences(full_df_scaled, features)
@@ -207,9 +207,27 @@ class LSTMBuilder:
             raise ValueError("Cannot train final model with no data sequences.")
 
         p = self.lstm_params
-        batch_size = p.get('batch_size', 32)
-        train_dataset = TensorDataset(torch.from_numpy(X_full), torch.from_numpy(y_full).unsqueeze(1))
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        batch_size = p.get('batch_size', 128)
+        num_workers = p.get('num_workers', 0)
+        
+        # --- 核心修正 1：为最终训练也应用高性能 DataLoader ---
+        # 确保 Tensor 是正确的精度类型
+        precision = p.get('precision', 32)
+        torch_dtype = torch.float16 if precision == 16 else torch.float32
+        
+        train_dataset = TensorDataset(
+            torch.from_numpy(X_full).to(dtype=torch_dtype), 
+            torch.from_numpy(y_full).unsqueeze(1).to(dtype=torch_dtype)
+        )
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True
+        )
+        # ---
         
         model = LSTMModel(
             input_size=X_full.shape[2],
@@ -218,15 +236,46 @@ class LSTMBuilder:
             dropout=p.get('dropout', 0.2)
         ).to(self.device)
         
-        criterion, optimizer = nn.MSELoss(), torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
         
-        final_epochs = max(1, int(p.get('epochs', 100) * 0.5))
-        for epoch in tqdm(range(final_epochs), desc="    - Final Model Epochs", leave=False):
+        # --- 核心修正 2：为最终训练也应用 AMP ---
+        use_amp = (precision == 16) and (self.device == 'cuda')
+        scaler_amp = torch.amp.GradScaler(enabled=use_amp)
+        # ---
+
+        # 在最终训练时，轮次可以适当减少，或者由配置决定
+        final_epochs = p.get('final_model_epochs', max(1, int(p.get('epochs', 100) * 0.5)))
+
+        # --- 核心修正 3：为最终训练也加入进度条和日志控制 ---
+        final_epoch_iterator = tqdm(range(final_epochs), desc="    - Final Model Epochs", leave=False, disable=not self.verbose)
+
+        for epoch in final_epoch_iterator:
             model.train()
+            epoch_loss_sum = 0.0
+            batch_count = 0
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
-                optimizer.zero_grad()
-                outputs = model(X_batch); loss = criterion(outputs, y_batch)
-                loss.backward(); optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
+                    outputs = model(X_batch)
+                    loss = criterion(outputs, y_batch)
+                
+                scaler_amp.scale(loss).backward()
+                scaler_amp.step(optimizer)
+                scaler_amp.update()
+                
+                epoch_loss_sum += loss.item()
+                batch_count += 1
+            
+            # 计算平均损失并更新进度条
+            avg_loss = epoch_loss_sum / batch_count if batch_count > 0 else 0.0
+            if self.verbose and (epoch + 1) % self.verbose_period == 0:
+                final_epoch_iterator.set_postfix(avg_loss=f"{avg_loss:.6f}")
+        # ---
+
+        if self.verbose:
+            print(f"    - Final model training finished after {final_epochs} epochs.")
 
         return {'model': model, 'scaler': final_scaler}
