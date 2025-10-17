@@ -9,7 +9,6 @@ from pathlib import Path
 from tqdm.autonotebook import tqdm
 from typing import Any, Dict, List, Optional
 
-# --- 健壮的导入逻辑 ---
 try:
     from data_process import get_data
     from model_builders.lgbm_builder import LGBMBuilder
@@ -51,7 +50,7 @@ def run_training_for_ticker(
     keyword: str = None
 ) -> Optional[pd.DataFrame]:
     """
-    (已重构) 接收预处理好的 folds 列表，执行训练，并生成 OOF 预测文件。
+    接收预处理好的 folds 列表，执行训练，并生成 OOF 预测文件。
     """
     display_name = keyword if keyword else ticker
     print(f"\n" + "="*80); print(f"--- Starting {model_type.upper()} training for {display_name} ({ticker}) ---")
@@ -72,53 +71,59 @@ def run_training_for_ticker(
     builder = builder_map[model_type](config)
     
     all_fold_ics = []
-    # --- 新增：初始化一个列表来收集 OOF 预测 ---
     oof_predictions = []
 
     if not preprocessed_folds:
-        print(f"WARNNING: No pre-processed folds provided for {display_name}. Skipping validation.")
+        print(f"WARNNING: 未为 {display_name} 提供预处理的 folds, 跳过验证.")
     else:
-        print(f"INFO: Starting Walk-Forward validation for {display_name} across {len(preprocessed_folds)} folds...")
-        fold_iterator = tqdm(preprocessed_folds, desc=f"Training {model_type.upper()} on {display_name}", leave=True)
+        print(f"INFO: 开始对 {display_name} 进行跨 {len(preprocessed_folds)} folds 的前向验证...")
+
+        fold_iterator = tqdm(
+            preprocessed_folds, 
+            desc=f"正在 {display_name} 上训练 {model_type.upper()} ", 
+            leave=True, 
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
+        )
         
         for fold_data in fold_iterator:
-            # --- 核心修正：接收所有三个返回值 ---
-            artifacts, ic_series_fold, oof_fold_df = builder.train_and_evaluate_fold(
+            artifacts, ic_series_fold, oof_fold_df, fold_stats = builder.train_and_evaluate_fold(
                 train_df=None, val_df=None, cached_data=fold_data
             )
             
+            if fold_stats:
+                postfix_str = ", ".join([f"{k}: {v}" for k, v in fold_stats.items()])
+                fold_iterator.set_postfix_str(postfix_str)
+
             if ic_series_fold is not None and not ic_series_fold.empty:
                 ic_series_fold['ticker'] = ticker
                 all_fold_ics.append(ic_series_fold)
             
-            # 将每个 fold 的 OOF 预测添加到列表中
             if oof_fold_df is not None and not oof_fold_df.empty:
                 oof_predictions.append(oof_fold_df)
             
             gc.collect()
 
-    # --- 新增：在所有 folds 结束后，保存 OOF 文件 ---
     if oof_predictions:
         full_oof_df = pd.concat(oof_predictions).sort_values('date').drop_duplicates(subset=['date'])
         oof_path = model_dir / f"{model_type}_oof_preds.csv"
         try:
             full_oof_df.to_csv(oof_path, index=False)
-            print(f"SUCCESS: Out-of-Fold predictions saved to {oof_path}")
+            print(f"SUCCESS: Out-of-Fold 预测已保存到 {oof_path}")
         except Exception as e:
-            print(f"ERROR: Failed to save Out-of-Fold predictions: {e}")
+            print(f"ERROR: 保存 Out-of-Fold 失败: {e}")
     
     full_df = config.get('full_df_for_final_model')
     if full_df is None:
-        print("ERROR: full_df_for_final_model not found in config for final training. Skipping.")
+        print("ERROR: 在最终训练配置中未找到 full_df_for_final_model, 已跳过.")
     else:
-        print(f"INFO: Training final model for {display_name} ({ticker}) on all data...")
+        print(f"INFO: 正在使用所有数据为 {display_name} ({ticker}) 训练最终模型...")
         final_artifacts = builder.train_final_model(full_df)
 
     if all_fold_ics:
         full_ic_history = pd.concat(all_fold_ics).sort_values('date').drop_duplicates('date')
         full_ic_history['model_type'] = model_type
         ic_history_path = model_dir / f"{model_type}_ic_history.csv"
-        full_ic_history.to_csv(ic_history_path, index=False) # 保存 IC 时也不需要索引
+        full_ic_history.to_csv(ic_history_path, index=False)
         return full_ic_history
         
     return pd.DataFrame()

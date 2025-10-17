@@ -34,22 +34,37 @@ class LSTMModel(nn.Module):
         return out
 
 class LSTMBuilder:
-    """LSTM 模型的构建器，现在适配全局预处理流程。"""
+    """LSTM 模型的构建器，适配全局预处理流程。"""
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         global_cfg = config.get('global_settings', {})
         
         default_params = config.get('default_model_params', {}).get('lstm_params', {})
         hpo_params = config.get('hpo_config', {}).get('lstm_hpo_config', {}).get('params', {})
-    
         self.lstm_params = {**default_params, **hpo_params}
+        
         self.sequence_length = self.lstm_params.get('sequence_length', 60)
         self.label_col = global_cfg.get('label_column', 'label_return')
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         self.verbose_period = self.lstm_params.get('verbose_period', 5)
         self.verbose = self.verbose_period > 0
-        if self.verbose: print(f"INFO: PyTorch LSTMBuilder will use device: {self.device.upper()}")
+        
+        if self.verbose:
+            print(f"INFO: PyTorch LSTMBuilder initialized with device: {self.device.upper()}")
+            
+            # 打印 DataLoader 信息
+            num_workers = self.lstm_params.get('num_workers', 0)
+            if num_workers > 0:
+                print(f"INFO: DataLoader will use {num_workers} parallel workers.")
+                
+            # 打印 AMP 信息
+            precision = self.lstm_params.get('precision', 32)
+            use_amp = (precision == 16) and (self.device == 'cuda')
+            if use_amp:
+                print("INFO: Automatic Mixed Precision (AMP) is ENABLED (float16).")
+            else:
+                print("INFO: Automatic Mixed Precision (AMP) is DISABLED (float32).")
 
     def _create_sequences(self, df: pd.DataFrame, feature_cols: list) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(公共辅助函数) 使用滑动窗口，将DataFrame转换为序列。现在由 Notebook 调用。"""
@@ -69,62 +84,41 @@ class LSTMBuilder:
             
         return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32), np.array(dates)
 
-    def train_and_evaluate_fold(self, train_df: pd.DataFrame = None, val_df: pd.DataFrame = None, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
-        if not cached_data:
-            raise ValueError("'cached_data' is required for this method.")
+    def train_and_evaluate_fold(self, train_df: pd.DataFrame = None, val_df: pd.DataFrame = None, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame, Dict]:
+        """
+        接收预处理好的 Tensors，执行模型训练和评估，并返回包含状态信息的 4 个值。
+        """
+        if not cached_data: raise ValueError("'cached_data' is required.")
 
-        # 保持数据在 CPU，以便 DataLoader 正确工作
-        X_train_tensor = cached_data['X_train_tensor']
-        y_train_tensor = cached_data['y_train_tensor']
-        X_val_tensor = cached_data['X_val_tensor']
-        y_val_tensor = cached_data['y_val_tensor']
-        y_val_seq = cached_data['y_val_seq']
-        dates_val_seq = cached_data['dates_val_seq']
+        X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, y_val_seq, dates_val_seq = (
+            cached_data['X_train_tensor'], cached_data['y_train_tensor'],
+            cached_data['X_val_tensor'], cached_data['y_val_tensor'],
+            cached_data['y_val_seq'], cached_data['dates_val_seq']
+        )
 
         if X_train_tensor.shape[0] == 0 or X_val_tensor.shape[0] == 0:
-            return {'model_state_dict': None}, pd.DataFrame(), pd.DataFrame()
+            return {'model_state_dict': None}, pd.DataFrame(), pd.DataFrame(), {}
 
         p = self.lstm_params
-        batch_size = p.get('batch_size', 128)
-        num_workers = p.get('num_workers', 0)
+        batch_size, num_workers = p.get('batch_size', 128), p.get('num_workers', 0)
         
-        if self.verbose and num_workers > 0:
-            print(f"INFO: DataLoader will use {num_workers} parallel workers.")
-
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=True,
-            num_workers=num_workers, 
-            pin_memory=True,            # 是否将数据加载到Pinned Memory中
-            drop_last=True              # 丢弃不完整的最后的批次
+            train_dataset, batch_size=batch_size, shuffle=True,
+            num_workers=num_workers, pin_memory=True, drop_last=True
         )
         
-        model = LSTMModel(
-            input_size=X_train_tensor.shape[2],
-            hidden_size_1=p.get('units_1', 64),
-            hidden_size_2=p.get('units_2', 32),
-            dropout=p.get('dropout', 0.2)
-        ).to(self.device)
-        
-        criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
+        model = LSTMModel(...).to(self.device)
+        criterion, optimizer = nn.MSELoss(), torch.optim.Adam(...)
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
         
-        # 根据 precision 决定是否启用 AMP
         precision = p.get('precision', 32)
         use_amp = (precision == 16) and (self.device == 'cuda')
-        if self.verbose and use_amp:
-            print("INFO: Automatic Mixed Precision (AMP) is ENABLED (float16).")
-        elif self.verbose:
-            print("INFO: Automatic Mixed Precision (AMP) is DISABLED (float32).")
         scaler_amp = torch.amp.GradScaler(enabled=use_amp)
 
         best_val_loss, patience_counter, best_model_state = float('inf'), 0, None
         patience = p.get('early_stopping_rounds_lstm', 50)
         epochs = p.get('epochs', 100)
-        verbose_period = self.lstm_params.get('verbose_period', 5)
         
         epoch_iterator = tqdm(range(epochs), desc="    - Epochs", leave=False, disable=not self.verbose)
         
@@ -133,21 +127,15 @@ class LSTMBuilder:
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 optimizer.zero_grad(set_to_none=True)
-                # 根据 use_amp 控制 autocast
                 with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
-                    outputs = model(X_batch)
-                    loss = criterion(outputs, y_batch)
-                
-                # GradScaler 在 enabled=False 时，scale/step/update 都是空操作
-                scaler_amp.scale(loss).backward()
-                scaler_amp.step(optimizer)
-                scaler_amp.update()
+                    outputs = model(X_batch); loss = criterion(outputs, y_batch)
+                scaler_amp.scale(loss).backward(); scaler_amp.step(optimizer); scaler_amp.update()
             
             model.eval()
             with torch.no_grad():
-                # 验证数据移至 GPU
-                val_outputs = model(X_val_tensor.to(self.device))
-                val_loss = criterion(val_outputs, y_val_tensor.to(self.device))
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
+                    val_outputs = model(X_val_tensor.to(self.device))
+                    val_loss = criterion(val_outputs, y_val_tensor.to(self.device))
             
             scheduler.step(val_loss)
             
@@ -157,16 +145,21 @@ class LSTMBuilder:
             else:
                 patience_counter += 1
             
-            if self.verbose and (epoch + 1) % verbose_period == 0:
+            if self.verbose and (epoch + 1) % self.verbose_period == 0:
                 epoch_iterator.set_description(f"    - Epochs {epoch + 1}")
                 epoch_iterator.set_postfix(total_epochs=epochs, best_val_loss=f"{best_val_loss:.6f}")
 
             if patience_counter >= patience: break
         
+        # --- 核心修正：在循环内部的打印，统一使用 tqdm.write ---
         if self.verbose:
             tqdm.write(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
 
         ic_df, oof_df = pd.DataFrame(), pd.DataFrame()
+        fold_stats = {}
+        if best_val_loss != float('inf'):
+            fold_stats['best_loss'] = f"{best_val_loss:.6f}"
+        
         if X_val_tensor.shape[0] > 0 and best_model_state:
             model.load_state_dict(best_model_state)
             model.eval()
@@ -183,14 +176,17 @@ class LSTMBuilder:
                         fold_ic = eval_df['y_pred'].rank().corr(eval_df['y_true'].rank(), method='spearman')
                         if pd.notna(fold_ic):
                             ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
-                    except Exception: 
-                        pass
+                    except Exception: pass
+
+        fold_stats = {}
+        if best_val_loss != float('inf'):
+            fold_stats['best_loss'] = f"{best_val_loss:.6f}"
 
         del model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, train_loader
         gc.collect()
         if self.device == 'cuda': torch.cuda.empty_cache()
             
-        return {'model_state_dict': best_model_state}, ic_df, oof_df
+        return {'model_state_dict': best_model_state}, ic_df, oof_df, fold_stats
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
         """在全部数据上训练最终模型"""
@@ -239,15 +235,12 @@ class LSTMBuilder:
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
         
-        # --- 核心修正 2：为最终训练也应用 AMP ---
         use_amp = (precision == 16) and (self.device == 'cuda')
         scaler_amp = torch.amp.GradScaler(enabled=use_amp)
-        # ---
 
         # 在最终训练时，轮次可以适当减少，或者由配置决定
         final_epochs = p.get('final_model_epochs', max(1, int(p.get('epochs', 100) * 0.5)))
 
-        # --- 核心修正 3：为最终训练也加入进度条和日志控制 ---
         final_epoch_iterator = tqdm(range(final_epochs), desc="    - Final Model Epochs", leave=False, disable=not self.verbose)
 
         for epoch in final_epoch_iterator:
@@ -269,11 +262,9 @@ class LSTMBuilder:
                 epoch_loss_sum += loss.item()
                 batch_count += 1
             
-            # 计算平均损失并更新进度条
             avg_loss = epoch_loss_sum / batch_count if batch_count > 0 else 0.0
             if self.verbose and (epoch + 1) % self.verbose_period == 0:
                 final_epoch_iterator.set_postfix(avg_loss=f"{avg_loss:.6f}")
-        # ---
 
         if self.verbose:
             print(f"    - Final model training finished after {final_epochs} epochs.")

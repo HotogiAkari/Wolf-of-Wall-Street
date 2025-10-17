@@ -208,7 +208,7 @@ default_model_params:
     units_2: 32                 # LSTM 第二个隐藏层的神经元数量. 
     dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合. 
     early_stopping_rounds_lstm: 20 # LSTM 的早停法耐心轮次. 
-    precision: 32               # 控制 LSTM 的训练精度(float16 或 float32)。
+    precision: 16               # 控制 LSTM 的训练精度(float16 或 float32). 从32修改为16需重新运行数据预处理.
 
   fuser_params:
     type: 'elastic_net'             # 元模型类型: 'elastic_net' (推荐), 'ridge' (线性，稳健) 或 'mlp' (非线性，更复杂). 

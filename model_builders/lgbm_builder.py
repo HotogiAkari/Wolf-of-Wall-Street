@@ -37,7 +37,7 @@ class LGBMBuilder:
         X = df_with_date[['date'] + features]; y = df[self.label_col]
         return X, y
 
-    def train_and_evaluate_fold(self, train_df: pd.DataFrame, val_df: pd.DataFrame, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
+    def train_and_evaluate_fold(self, train_df: pd.DataFrame, val_df: pd.DataFrame, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame, Dict]:
         if cached_data:
             X_train_scaled = cached_data['X_train_scaled']
             y_train = cached_data['y_train']
@@ -54,6 +54,8 @@ class LGBMBuilder:
             X_val_scaled = pd.DataFrame(fold_scaler.transform(X_val_model), index=X_val_model.index, columns=features_for_model)
 
         quantile_models = {}
+        fold_stats = {}
+
         for q in self.quantiles:
             params = self.lgbm_params.copy()
             params['alpha'] = q
@@ -74,11 +76,9 @@ class LGBMBuilder:
                     )]
                 )
 
-            # --- 核心修正：用 self.verbose 控制这里的打印 ---
             best_iteration = model.best_iteration_
             if self.verbose and best_iteration:
-                tqdm.write(f"    - Quantile {q}: Finished. Best iter: [{best_iteration}]")
-            # ---
+                fold_stats[f'q_{q}_best_iter'] = best_iteration
 
             quantile_models[f'q_{q}'] = model
         
@@ -99,7 +99,7 @@ class LGBMBuilder:
                     ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
             except Exception: pass
             
-        return {'models': quantile_models}, ic_df, oof_df
+        return {'models': quantile_models}, ic_df, oof_df, fold_stats
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
         X_full, y_full = self._extract_xy(full_df)
