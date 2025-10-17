@@ -93,11 +93,13 @@ class LGBMBuilder:
             # 创建 OOF DataFrame
             oof_df = eval_df[['date', 'y_true', 'y_pred']]
 
-            try:
-                fold_ic = eval_df['y_pred'].rank().corr(eval_df['y_true'].rank(), method='spearman')
-                if pd.notna(fold_ic):
-                    ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
-            except Exception: pass
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning) # 忽略此 with 块内的所有 UserWarning
+                try:
+                    fold_ic = eval_df['y_pred'].rank().corr(eval_df['y_true'].rank(), method='spearman')
+                    if pd.notna(fold_ic):
+                        ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
+                except Exception: pass
             
         return {'models': quantile_models}, ic_df, oof_df, fold_stats
 
