@@ -164,7 +164,7 @@ class LSTMBuilder:
             if patience_counter >= patience: break
         
         if self.verbose:
-            print(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
+            tqdm.write(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
 
         ic_df, oof_df = pd.DataFrame(), pd.DataFrame()
         if X_val_tensor.shape[0] > 0 and best_model_state:

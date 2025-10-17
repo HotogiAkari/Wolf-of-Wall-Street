@@ -5,6 +5,7 @@ import optuna
 import warnings
 import numpy as np
 from pathlib import Path
+from tqdm.autonotebook import tqdm
 
 try:
     from model_builders.lgbm_builder import LGBMBuilder
@@ -96,7 +97,7 @@ def objective(trial, preprocessed_folds: list, config: dict, model_type: str = '
 
 def run_hpo_for_ticker(preprocessed_folds: list, ticker: str, config: dict, model_type: str = 'lgbm') -> tuple:
     """
-    为指定的股票运行 HPO，并返回 (best_params, best_value) 元组。
+    (已重构) 运行 HPO，使用 TQDM 回调函数来提供简洁、动态的进度反馈。
     """
     hpo_config = config.get('hpo_config', {})
     model_hpo_config = hpo_config.get(f'{model_type}_hpo_config', {})
@@ -106,18 +107,40 @@ def run_hpo_for_ticker(preprocessed_folds: list, ticker: str, config: dict, mode
     
     print(f"\n--- 开始为 {keyword} ({ticker}) 进行 {model_type.upper()} HPO (共 {n_trials} 轮) ---")
     
+    # --- 核心修正 1：关闭 Optuna 的默认日志 ---
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
     study = optuna.create_study(direction="maximize", storage=None, sampler=optuna.samplers.TPESampler(seed=config.get('global_settings', {}).get('seed', 42)))
     
+    # --- 核心修正 2：创建 TQDM 进度条和回调函数 ---
+    best_value_tracker = {'value': -float('inf')}
+    pbar = tqdm(total=n_trials, desc=f"HPO on {keyword}", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]')
+
+    def callback(study: optuna.study.Study, trial: optuna.trial.FrozenTrial):
+        # 每次 trial 结束都更新进度条
+        pbar.update(1)
+        
+        # 只有在找到新的最优值时，才更新后缀信息
+        if study.best_value is not None and study.best_value > best_value_tracker['value']:
+            best_value_tracker['value'] = study.best_value
+            pbar.set_postfix_str(f"New Best ICIR: {study.best_value:.4f} (Trial #{study.best_trial.number})", refresh=True)
+
     try:
         study.optimize(
             lambda trial: objective(trial, preprocessed_folds, config, model_type), 
             n_trials=n_trials, 
             n_jobs=1, 
-            show_progress_bar=True
+            # 关闭 Optuna 自带的进度条，使用我们自己的
+            show_progress_bar=False,
+            # 传入回调函数
+            callbacks=[callback]
         )
     except Exception as e: 
         print(f"错误: 在为 {keyword} 进行 HPO 时发生异常: {e}")
+        pbar.close() 
         return {}, None
+    
+    pbar.close()
         
     PARAM_MAP_CN = {
         'num_leaves': '叶子节点数', 'learning_rate': '学习率',

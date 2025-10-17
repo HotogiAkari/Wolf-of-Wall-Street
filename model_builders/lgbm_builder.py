@@ -3,6 +3,7 @@
 import warnings
 import pandas as pd
 import lightgbm as lgb
+from tqdm.autonotebook import tqdm
 from typing import Any, Dict, Tuple
 from lightgbm.callback import early_stopping
 from sklearn.preprocessing import StandardScaler
@@ -12,14 +13,21 @@ class LGBMBuilder:
         self.config = config
         
         global_cfg = config.get('global_settings', {})
+        # 合并所有层级的 lgbm 参数
         default_params = config.get('default_model_params', {}).get('lgbm_params', {})
-        hpo_params = config.get('hpo_config', {}).get('lgbm_hpo_params', {})
+        hpo_fixed_params = config.get('hpo_config', {}).get('lgbm_hpo_config', {}).get('params', {})
+        trial_params = config.get('lgbm_params', {})
         
-        final_params = {**default_params, **hpo_params}
+        final_params = {**default_params, **hpo_fixed_params, **trial_params}
         final_params['random_state'] = global_cfg.get('seed', 42)
+        # 强制关闭 C++ 内核日志
         final_params['verbose'] = -1
         
         self.lgbm_params = final_params
+        
+        self.verbose_period = self.lgbm_params.get('verbose_period', -1)
+        self.verbose = self.verbose_period > 0
+        
         self.quantiles = global_cfg.get('quantiles', [0.05, 0.5, 0.95])
         self.label_col = global_cfg.get('label_column', 'label_return')
 
@@ -50,6 +58,7 @@ class LGBMBuilder:
             params = self.lgbm_params.copy()
             params['alpha'] = q
             model = lgb.LGBMRegressor(**params)
+            
             early_stopping_rounds = self.lgbm_params.get('early_stopping_rounds', 100)
             
             with warnings.catch_warnings():
@@ -58,12 +67,18 @@ class LGBMBuilder:
                     X_train_scaled, y_train,
                     eval_set=[(X_val_scaled, y_val)],
                     eval_metric='quantile',
-                    callbacks=[early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)]
+                    callbacks=[early_stopping(
+                        stopping_rounds=early_stopping_rounds, 
+                        # verbose=False 确保早停本身不打印日志
+                        verbose=False 
+                    )]
                 )
-            
+
+            # --- 核心修正：用 self.verbose 控制这里的打印 ---
             best_iteration = model.best_iteration_
-            if self.lgbm_params.get('verbose_period', -1) > 0 and best_iteration:
-                print(f"    - Quantile {q}: Finished. Best iter: [{best_iteration}]")
+            if self.verbose and best_iteration:
+                tqdm.write(f"    - Quantile {q}: Finished. Best iter: [{best_iteration}]")
+            # ---
 
             quantile_models[f'q_{q}'] = model
         

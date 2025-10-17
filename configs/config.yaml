@@ -126,7 +126,7 @@ hpo_config:
   # 全局 HPO 设置 (作为回退的默认值)
   n_trials: 20                  # 全局默认的试验次数. 
   hpo_num_eval_folds: 2         # 全局默认的 HPO 内部评估验证集数量. 
-  tickers_for_hpo: ['600519.SH', '000001.SZ'] # 指定一个股票子集来运行 HPO. 
+  tickers_for_hpo: ['000100.SZ', '000426.SZ', '000001.SZ'] # 指定一个股票子集来运行 HPO. 
   
   # --- LGBM 专属 HPO 配置 ---
   lgbm_hpo_config:
@@ -166,7 +166,7 @@ hpo_config:
     # 格式: [类型, ...]. 
     search_space:
       # [浮点数, 对数] 学习率. LSTM 对此非常敏感. 建议范围 [1e-4, 1e-2]. 
-      learning_rate: ["float", 1e-4, 1e-2, true]
+      learning_rate: ["float", 0.0001, 0.02, true]
       
       # [分类] 第一个 LSTM 隐藏层的神经元数量. 从给定的列表中选择一个. 
       units_1: ["categorical", [32, 64, 128]]
@@ -249,7 +249,7 @@ stocks_to_process:
 
   - ticker: '300013.SZ'
     keyword: '新宁物流'
-    industry_etf: '159928.SZ'   # 物流相关可用中证物流主题ETF或沪深300代表
+    industry_etf: '159928.SZ'
 
   - ticker: '300242.SZ'
     keyword: '佳云科技'
@@ -265,4 +265,4 @@ stocks_to_process:
   
   - ticker: '300242.SZ'
     keyword: '佳云科技'
-    industry_etf: '159939.SZ'   # 科技 / 互联网 ETF 示例
+    industry_etf: '159939.SZ'   # 科技 / 互联网 ETF
