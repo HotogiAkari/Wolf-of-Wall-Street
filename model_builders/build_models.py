@@ -56,7 +56,6 @@ def run_training_for_ticker(
     为单个模型执行完整的滚动训练，并支持断点续训功能。
     """
     display_name = keyword if keyword else ticker
-    print(f"\n" + "="*80)
     print(f"--- 开始为 {display_name} ({ticker}) 进行 {model_type.upper()} 模型训练 ---")
 
     model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / ticker

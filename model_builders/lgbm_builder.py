@@ -63,44 +63,49 @@ class LGBMBuilder:
             
             early_stopping_rounds = self.lgbm_params.get('early_stopping_rounds', 100)
             
+            # --- 核心修正 1：将警告抑制的范围扩大 ---
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+                warnings.simplefilter("ignore") # 忽略此 with 块内发出的所有警告
+                
                 model.fit(
                     X_train_scaled, y_train,
                     eval_set=[(X_val_scaled, y_val)],
                     eval_metric='quantile',
-                    callbacks=[early_stopping(
-                        stopping_rounds=early_stopping_rounds, 
-                        # verbose=False 确保早停本身不打印日志
-                        verbose=False 
-                    )]
+                    callbacks=[early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)]
                 )
 
             best_iteration = model.best_iteration_
             if self.verbose and best_iteration:
+                # 注意：tqdm.write 应该在 build_models.py 中使用，这里我们暂时保留 print
+                # 在 Builder 内部，我们不知道外部是否有 tqdm
+                pass # 暂时关闭 fold 内部的打印，让外部的 tqdm 后缀来显示
+
+            # 将最佳轮次信息存入状态字典，无论 verbose 如何
+            if best_iteration:
                 fold_stats[f'q_{q}_best_iter'] = best_iteration
 
             quantile_models[f'q_{q}'] = model
         
         median_model = quantile_models.get(f'q_{0.5}')
         ic_df = pd.DataFrame()
-        oof_df = pd.DataFrame() # <-- 初始化 OOF DataFrame
+        oof_df = pd.DataFrame()
 
         if median_model and not y_val.empty and len(y_val) > 1:
             preds = median_model.predict(X_val_scaled)
             eval_df = pd.DataFrame({"y_pred": preds, "y_true": y_val.values, "date": y_val.index})
-            
-            # 创建 OOF DataFrame
             oof_df = eval_df[['date', 'y_true', 'y_pred']]
 
+            # --- 核心修正 2：将 IC 计算也放入一个警告抑制块中 ---
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning) # 忽略此 with 块内的所有 UserWarning
+                warnings.simplefilter("ignore")
                 try:
                     fold_ic = eval_df['y_pred'].rank().corr(eval_df['y_true'].rank(), method='spearman')
                     if pd.notna(fold_ic):
                         ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
-                except Exception: pass
-            
+                except Exception: 
+                    pass
+            # ---
+                
         return {'models': quantile_models}, ic_df, oof_df, fold_stats
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:

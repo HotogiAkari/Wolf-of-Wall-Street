@@ -223,17 +223,13 @@ default_model_params:
 # 定义要处理的所有股票. 每个条目都可以选择性地覆盖上面的任何默认参数. 
 stocks_to_process:
 
-  - ticker: '000001.SZ'
-    keyword: '平安银行'
-    industry_etf: '512800.SH'
-    # 为平安银行定制更简单的 LGBM 模型 (覆盖默认参数)
-    lgbm_params:
-      num_leaves: 7
-      min_child_samples: 30
-
   - ticker: '000100.SZ'
     keyword: 'TCL科技'
     industry_etf: '159928.SZ'
+    # 可以在此处定制 LGBM 模型 (覆盖默认参数)
+    #lgbm_params:
+    #  num_leaves: 7
+    #  min_child_samples: 30
   
   - ticker: '000426.SZ'
     keyword: '兴业矿业'

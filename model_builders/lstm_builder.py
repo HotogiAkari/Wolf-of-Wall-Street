@@ -108,7 +108,13 @@ class LSTMBuilder:
             num_workers=num_workers, pin_memory=True, drop_last=True
         )
         
-        model = LSTMModel(...).to(self.device)
+        model = LSTMModel(
+            input_size=X_train_tensor.shape[2],
+            hidden_size_1=p.get('units_1', 64),
+            hidden_size_2=p.get('units_2', 32),
+            dropout=p.get('dropout', 0.2)
+        ).to(self.device)
+        
         criterion, optimizer = nn.MSELoss(), torch.optim.Adam(...)
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
         
