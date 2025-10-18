@@ -102,6 +102,28 @@ def run_data_pipeline(config_path: str):
     except Exception as e:
         print(f"错误: 无法加载或解析配置文件 '{config_path}': {e}")
         return
+    
+    strategy_config = config.get('strategy_config', {})
+    
+    # 动态计算 start_date
+    print("INFO: 正在根据 'end_date' 和 'data_lookback_years' 动态计算 'start_date'...")
+    try:
+        end_date_dt = pd.to_datetime(strategy_config['end_date'])
+        lookback_years = strategy_config.get('data_lookback_years', 10)
+        earliest_start_date_dt = pd.to_datetime(strategy_config['earliest_start_date'])
+        
+        target_start_date_dt = end_date_dt - pd.DateOffset(years=lookback_years)
+        start_date_dt = max(target_start_date_dt, earliest_start_date_dt)
+        
+        calculated_start_date = start_date_dt.strftime('%Y-%m-%d')
+        
+        # 将计算结果“注入”回 config 字典，供后续所有函数使用
+        config['strategy_config']['start_date'] = calculated_start_date
+        print(f"      计算得出的 start_date 为: {calculated_start_date}，已更新到本次运行的配置中。")
+
+    except KeyError as e:
+        print(f"错误: 动态计算 start_date 失败，因为缺少关键配置项: {e}。")
+        return
 
     stocks_to_process = config.get('stocks_to_process', [])
     if not stocks_to_process:
@@ -125,7 +147,7 @@ def run_data_pipeline(config_path: str):
         
     print(f"\n需要为以下 {len(tickers_to_generate)} 只股票生成新数据: {tickers_to_generate}")
 
-    processed_data = process_all_from_config(config_path, tickers_to_generate=tickers_to_generate)
+    processed_data = process_all_from_config(config, tickers_to_generate=tickers_to_generate)
 
     if processed_data:
         save_processed_data(processed_data, config)

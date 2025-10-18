@@ -422,8 +422,17 @@ def _get_market_sentiment_data_ak(start_date: str, end_date: str, cache_dir: Pat
 
 # 公共 API 函数
 
-def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, prediction_mode: bool = False, 
-                        market_breadth_df: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
+def get_full_feature_df(
+    ticker: str, 
+    config: Dict, 
+    keyword: str = None, 
+    prediction_mode: bool = False, 
+    market_breadth_df: Optional[pd.DataFrame] = None,
+    external_market_df: Optional[pd.DataFrame] = None,
+    market_sentiment_df: Optional[pd.DataFrame] = None,
+    macro_df: Optional[pd.DataFrame] = None,
+    factors_df: Optional[pd.DataFrame] = None
+) -> Optional[pd.DataFrame]:
     """
     为单个股票执行完整的特征生成流程，实现了：
     - 智能的、解耦 Tushare 的指数数据获取。
@@ -457,61 +466,42 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     
     # --- 1. 数据获取 ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
-
-    sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
-
-    external_market_df = None
-    # 从 run_config 中读取外部市场列表，如果不存在则默认为空列表
-    external_tickers = run_config.get('external_market_tickers', [])
-    if not external_tickers:
-        print("  - 信息: 未在配置中找到 'external_market_tickers'，将跳过跨市场特征计算。")
-    else:
-        # 为了保持当前逻辑不变，我们暂时只使用列表中的第一个 ticker
-        # 未来可以扩展为循环处理所有 tickers
-        ext_ticker = external_tickers[0]
-        print(f"  - 信息: 正在根据配置获取外部市场数据: {ext_ticker}")
-        
-        external_market_df = _get_us_stock_data_yf(ext_ticker, start_date_str, end_date_str, cache_dir)
-        if external_market_df is not None:
-            # 重命名列以避免与主数据冲突
-            external_market_df.rename(columns={'close': 'close_ext', 'open': 'open_ext', 'volume': 'volume_ext'}, inplace=True)
-    
+    # 获取个股OHLCV
     df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
     if df is None: return None
 
-    benchmark_ticker = run_config.get('benchmark_ticker')
+    # 获取与个股相关的行业指数
     industry_ticker = run_config.get('industry_etf')
-    
-    benchmark_df = _get_index_data_bs(benchmark_ticker, start_date_str, end_date_str, cache_dir, display_name="基准指数")
     industry_df = _get_index_data_bs(industry_ticker, start_date_str, end_date_str, cache_dir, display_name=f"{keyword}的行业指数")
     
-    factors_df = _get_fama_french_factors(start_date_str, end_date_str)
-    macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str, config)
+    # 获取基准指数 (虽然也是全局的，但通常与个股一同获取)
+    benchmark_ticker = run_config.get('benchmark_ticker')
+    benchmark_df = _get_index_data_bs(benchmark_ticker, start_date_str, end_date_str, cache_dir, display_name="基准指数")
     
     # --- 2. 基础特征计算 ---
     if market_breadth_df is not None:
         df = df.join(market_breadth_df, how='left')
-    if macro_df is not None: 
+    if market_sentiment_df is not None:
+        df = df.join(market_sentiment_df, how='left')
+        df[market_sentiment_df.columns] = df[market_sentiment_df.columns].ffill() # 情绪数据需要前向填充
+    if macro_df is not None:
         df = pd.merge_asof(df, macro_df, left_index=True, right_index=True, direction='backward')
+    
+    # 合并个股相关数据
     if benchmark_df is not None:
         df = df.join(benchmark_df['close'].rename('benchmark_close'), how='left')
     if industry_df is not None:
         df = df.join(industry_df['close'].rename('industry_close'), how='left')
-    if sentiment_df is not None:
-        df = df.join(sentiment_df, how='left')
-        df['china_vix'] = df['china_vix'].ffill()
-        
-    run_config_with_api = {**run_config, 'tushare_pro_instance': pro, 'ticker': ticker}
-
-    extra_data_for_calc = {'external_market_df': external_market_df}
-    df = feature_calculators.run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
     
     # --- 3. 特征后处理 ---
-    # 运行通用的后处理器 (平稳化, 特征选择等)
-    df = run_all_feature_postprocessors(df, run_config, factors_df=factors_df)
-    df.columns = df.columns.str.lower()
+    run_config_with_api = {**run_config, 'tushare_pro_instance': pro, 'ticker': ticker}
+    extra_data_for_calc = {'external_market_df': external_market_df} # 外部市场数据在这里传入计算器
+    df = feature_calculators.run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
     
-    # 4. --- 数据清洗和校验 ---
+    # --- 4. 特征后处理 ---
+    df = run_all_feature_postprocessors(df, run_config, factors_df=factors_df)
+
+    # 5. --- 数据清洗和校验 ---
     ffill_limit = run_config.get("ffill_limit", 5)
     df.ffill(inplace=True, limit=ffill_limit)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -539,24 +529,23 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     print(f"--- 成功为 {display_name} 生成特征. 维度: {df.shape} ---")
     return df
 
-def process_all_from_config(config_path: str, tickers_to_generate: list = None) -> Dict[str, pd.DataFrame]:
+def process_all_from_config(config: dict, tickers_to_generate: list = None) -> Dict[str, pd.DataFrame]:
     """
     根据配置文件，为指定的股票列表生成特征。
     如果 tickers_to_generate 为 None，则处理所有股票。
     """
-    print("--- 开始批量特征生成 ---")
-    if tickers_to_generate:
-        print(f"针对特定股票: {len(tickers_to_generate)} 生成特征.")
-    else:
-        print("针对配置文件中的所有股票代码生成特征.")
-
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f) if config_path.endswith(('.yaml', '.yml')) else json.load(f)
-    except Exception as e:
-        print(f"ERROR: Config file {config_path} not found or failed to parse: {e}"); return {}
+    if not config:
+        print("错误: 传入的 config 字典为空。"); return {}
     
-    # 1. 提前计算全局的数据时间范围
+    # --- 核心变化：不再需要从文件加载 config ---
+    
+    # --- 逻辑简化：直接从传入的 config 中获取 start_date ---
+    strategy_config = config.get('strategy_config', {})
+    # get_runtime_date_range 的逻辑已经被移到 run_data_pipeline 中了
+    start_date_str = strategy_config['start_date'] # 直接读取注入的值
+    end_date_str = strategy_config['end_date']
+    
+    # --- 1. 在循环外准备所有全局数据 ---
     end_date_dt = pd.to_datetime(config['strategy_config']['end_date'])
     lookback_years = config['strategy_config'].get('data_lookback_years', 10)
     earliest_start_date_dt = pd.to_datetime(config['strategy_config']['earliest_start_date'])
@@ -566,11 +555,34 @@ def process_all_from_config(config_path: str, tickers_to_generate: list = None) 
     
     cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
 
-    # 2. 在循环开始前，只调用一次，生成全局的市场广度数据
     print("\n--- 正在准备全局市场数据---")
-    breadth_df_global = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
-    print("--- 全局市场数据准备完毕 ---\n")
+    breadth_df = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
+    time.sleep(0.5)
+
+        # (新增) 获取外部市场数据
+    external_market_df = None
+    external_tickers = config.get('strategy_config', {}).get('external_market_tickers', [])
+    if external_tickers:
+        ext_ticker = external_tickers[0] # 暂时只用第一个
+        external_market_df = _get_us_stock_data_yf(ext_ticker, start_date_str, end_date_str, cache_dir)
+        if external_market_df is not None:
+            external_market_df.rename(columns={'close': 'close_ext', 'open': 'open_ext', 'volume': 'volume_ext'}, inplace=True)
+    time.sleep(0.5)
+
+    # (新增) 获取市场情绪数据
+    sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
+    time.sleep(0.5)
     
+    # (新增) 获取宏观经济数据
+    macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str, config)
+    time.sleep(0.5)
+
+    # (新增) 获取法马-佛伦奇三因子数据
+    factors_df = _get_fama_french_factors(start_date_str, end_date_str)
+    
+    print("--- 所有全局市场数据准备完毕 ---\n")
+    
+    # --- 2. 循环处理每只股票 ---
     results_df = {}
     stocks_to_process = config.get('stocks_to_process', [])
     if not stocks_to_process:
@@ -589,9 +601,18 @@ def process_all_from_config(config_path: str, tickers_to_generate: list = None) 
         if not ticker: 
             print(f"  - WARNNING: Skipping invalid config entry at index {i-1} (missing ticker)."); continue
         
-        df = get_full_feature_df(ticker, config, keyword, market_breadth_df=breadth_df_global)
+        df = get_full_feature_df(
+            ticker=ticker, 
+            config=config, 
+            keyword=keyword, 
+            market_breadth_df=breadth_df,
+            external_market_df=external_market_df,
+            market_sentiment_df=sentiment_df,
+            macro_df=macro_df,
+            factors_df=factors_df
+        )
         if df is not None: results_df[ticker] = df
         time.sleep(0.2)
     
-    print("--- Batch Feature Generation Process Finished ---")
+    print("--- 批量特征生成流程完成 ---")
     return results_df

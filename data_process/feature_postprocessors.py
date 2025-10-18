@@ -113,7 +113,6 @@ class RawReturnLabelCalculator(FeaturePostprocessor):
         except KeyError:
             print("错误: 在 global_settings 中未找到关键配置 'label_column'。无法计算标签。")
             return df
-        # --- 修改结束 ---
         
         df[label_col] = df['close'].pct_change(periods=horizon).shift(-horizon)
         
