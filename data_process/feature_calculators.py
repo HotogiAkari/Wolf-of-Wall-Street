@@ -4,6 +4,7 @@
 '''
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 import statsmodels.api as sm
 from abc import ABC, abstractmethod
 from statsmodels.regression.rolling import RollingOLS
@@ -18,7 +19,7 @@ class FeatureCalculator(ABC):
         self.config = config
 
     @abstractmethod
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         """
         接收一个DataFrame，计算特征，并将结果作为新列添加后返回。
         """
@@ -40,7 +41,7 @@ class CandlestickPatternCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Candlestick Patterns"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         required_cols = {'open', 'high', 'low', 'close'}
         if not required_cols.issubset(df.columns):
             print(f"WARNNING: [{self.name}] DataFrame is missing required columns. Skipping.")
@@ -64,7 +65,7 @@ class TechnicalIndicatorCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Technical Indicators"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         indicators_to_calc = self.config.get('technical_indicators', [])
         if not indicators_to_calc:
             print(f"  - [Calculating Features] INFO: No technical indicators specified in config. Skipping {self.name}.")
@@ -98,7 +99,7 @@ class CalendarFeatureCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Calendar Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         print(f"  - [Calculating Features] Running: {self.name}...")
         df.index = pd.to_datetime(df.index)
         df['day_of_week'] = df.index.dayofweek
@@ -115,7 +116,7 @@ class StatisticalFeatureCalculator(FeatureCalculator):
     def name(self):
         return "Statistical Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         print(f"  - [Calculating Features] Running: {self.name}...")
         window_sizes = self.config.get('stat_windows', [5, 10, 20])
         for w in window_sizes:
@@ -135,7 +136,7 @@ class PriceStructureCalculator(FeatureCalculator):
     def name(self):
         return "Price Structure Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         print(f"  - [Calculating Features] Running: {self.name}...")
         df['body'] = (df['close'] - df['open']).abs()
         df['upper_shadow'] = df['high'] - df[['close', 'open']].max(axis=1)
@@ -155,7 +156,7 @@ class VolumeFeatureCalculator(FeatureCalculator):
     def name(self):
         return "Volume Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         print(f"  - [Calculating Features] Running: {self.name}...")
         if 'volume' not in df.columns:
             print(f"    - WARNNING: Missing 'volume' column. Skipping {self.name}.")
@@ -177,7 +178,7 @@ class TrendRegimeFeatureCalculator(FeatureCalculator):
     def name(self):
         return "Trend Regime Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name} (Vectorized)...")
         
@@ -212,7 +213,7 @@ class MomentumVolatilityCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Momentum & Volatility Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name}...")
         
@@ -253,7 +254,7 @@ class FundamentalCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Fundamental Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name}...")
 
@@ -316,7 +317,7 @@ class RelativeStrengthCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Relative Strength & Beta Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name}...")
         
@@ -369,7 +370,7 @@ class MarketRegimeCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Market Regime Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name}...")
 
@@ -400,7 +401,7 @@ class AdvancedRiskCalculator(FeatureCalculator):
     def name(self) -> str:
         return "Advanced Risk Features"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name}...")
 
@@ -429,7 +430,7 @@ class CrossoverSignalCalculator(FeatureCalculator):
     def name(self) -> str:
         return "交叉信号特征 (金叉/死叉)"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         crossover_rules = self.config.get('crossover_signals', [])
         if not crossover_rules:
             print(f"  - [计算特征] 信息: 未在配置中指定交叉信号规则，跳过 {self.name}。")
@@ -478,21 +479,38 @@ class CandleQuantCalculator(FeatureCalculator):
     def name(self) -> str:
         return "K线量化解构特征"
 
-    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         print(f"  - [计算特征] 正在运行: {self.name}...")
 
         # 1. K线在布林带中的位置
         # 这个特征衡量了收盘价相对于近期波动区间的极端程度。
         # 值接近1代表接近上轨（超买），接近0代表接近下轨（超卖）。
+        
         try:
-            bbands = df.ta.bbands(length=20)
-            # 为了避免除以零，处理布林带宽度为0的情况
-            bandwidth = (bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']).replace(0, 1e-9)
-            df['candle_pos_in_bbands'] = (df['close'] - bbands['BBL_20_2.0']) / bandwidth
-            df.drop(columns=['BBU_20_2.0', 'BBM_20_2.0', 'BBL_20_2.0', 'BBB_20_2.0', 'BBP_20_2.0'], inplace=True, errors='ignore')
-            print(f"    - 已计算: K线在布林带中的位置")
+            # 1. 先执行计算
+            # 使用 append=True 会直接将计算结果添加到 df 中，更简洁
+            df.ta.bbands(length=20, append=True)
+            
+            # --- 修改开始: 动态查找列名 ---
+            # 2. 动态查找上轨(BBU)和下轨(BBL)的列名
+            bbu_col = next((col for col in df.columns if col.startswith('BBU_')), None)
+            bbl_col = next((col for col in df.columns if col.startswith('BBL_')), None)
+            
+            if bbu_col and bbl_col:
+                # 3. 如果找到了，就执行计算
+                bandwidth = (df[bbu_col] - df[bbl_col]).replace(0, 1e-9)
+                df['candle_pos_in_bbands'] = (df['close'] - df[bbl_col]) / bandwidth
+                print(f"    - 已计算: K线在布林带中的位置")
+            else:
+                print(f"    - 警告: 未能动态找到布林带的上轨或下轨列。跳过此特征。")
+            
+            # 4. 清理所有由 bbands 生成的辅助列
+            bbands_cols_to_drop = [col for col in df.columns if col.startswith(('BBU_', 'BBM_', 'BBL_', 'BBB_', 'BBP_'))]
+            df.drop(columns=bbands_cols_to_drop, inplace=True, errors='ignore')
+            # --- 修改结束 ---
+            
         except Exception as e:
-            print(f"    - 警告: 计算布林带特征失败: {e}")
+            print(f"    - 警告: 计算布林带特征时发生意外错误: {e}")
 
         # 2. 波动率收缩/扩张
         # 衡量今天的振幅（high-low）相对于过去一段时间平均振幅的大小。

@@ -112,23 +112,23 @@ strategy_config:
   momentum_windows: [3, 6, 12]      # [整数列表] 定义计算动量/波动率类因子时使用的窗口期（单位：月）
   # 配置K线形态 用于 CandlestickPatternCalculator
   candlestick_patterns:
-    - "CDLDOJI"               # 十字星：犹豫信号，可能反转
-    - "CDLHAMMER"             # 锤子线：底部反转信号
-    - "CDLENGULFING"          # 吞没形态：趋势切换信号
-    - "CDLSHOOTINGSTAR"       # 流星线：顶部反转信号
-    - "CDLMORNINGSTAR"        # 晨星形态：底部反转信号
-    - "CDLEVENINGSTAR"        # 黄昏星形态：顶部反转信号
+    - "doji"                # 十字星：犹豫信号，可能反转
+    - "hammer"              # 锤子线：底部反转信号
+    - "engulfing"           # 吞没形态：趋势切换信号
+    - "shootingstar"        # 流星线：顶部反转信号
+    - "morningstar"         # 晨星形态：底部反转信号
+    - "eveningstar"         # 黄昏星形态：顶部反转信号
     # 强力趋势与动量形态
-    - "CDL3WHITESOLDIERS"     # 三白兵：强烈的看涨反转/持续信号
-    - "CDL3BLACKCROWS"        # 三只乌鸦：强烈的看跌反转/持续信号
-    - "CDLMARUBOZU"           # 光头光脚：单方向的极致动量信号
+    - "3whitesoldiers"      # 三白兵：强烈的看涨反转/持续信号
+    - "3blackcrows"         # 三只乌鸦：强烈的看跌反转/持续信号
+    - "marubozu"            # 光头光脚：单方向的极致动量信号
     # 趋势持续形态
-    - "CDLRISING3METHODS"     # 上升三法：强看涨持续信号
-    - "CDLFALLING3METHODS"    # 下降三法：强看跌持续信号
+    - "rising3methods"      # 上升三法：强看涨持续信号
+    - "falling3methods"     # 下降三法：强看跌持续信号
     # 经典反转形态
-    - "CDLHARAMI"             # 孕线形态：趋势动力减弱信号
-    - "CDLPIERCING"           # 刺透形态：底部反转信号
-    - "CDLDARKCLOUDCOVER"     # 乌云盖顶：顶部反转信号
+    - "harami"              # 孕线形态：趋势动力减弱信号
+    - "piercing"            # 刺透形态：底部反转信号
+    - "darkcloudcover"      # 乌云盖顶：顶部反转信号
   # 配置技术指标 (用于 TechnicalIndicatorCalculator), 这是计算金叉/死叉的基础
   technical_indicators:
     - name: ema

@@ -204,16 +204,18 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: P
         
     return df[['open', 'high', 'low', 'close', 'volume']]
 
-def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
+def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_dir: Path, display_name: str = None) -> Optional[pd.DataFrame]:
     """
-    (新增) 优先从 Baostock 获取指数数据。如果失败，则获取成分股并在本地计算等权重指数。
+    (更新) 优先从 Baostock 获取指数数据。
     """
-    print(f"  - INFO: 正在为指数 {index_code} 获取数据...")
+    # 如果没有提供显示名称，就使用代码本身
+    name_to_show = display_name if display_name else index_code
+    print(f"  - INFO: 正在为 '{name_to_show}' ({index_code}) 获取指数数据...")
     
-    # 尝试直接获取指数数据
-    index_df = _get_ohlcv_data_bs(index_code, start_date, end_date, cache_dir, keyword=f"指数-{index_code}")
+    # 将显示名称传递给下一层函数
+    index_df = _get_ohlcv_data_bs(index_code, start_date, end_date, cache_dir, keyword=name_to_show)
     if index_df is not None and not index_df.empty:
-        print(f"    - SUCCESS: 已直接从 Baostock 获取到指数 {index_code} 的数据。")
+        print(f"    - SUCCESS: 已直接从 Baostock 获取到 '{name_to_show}' 的数据。") # <--- 修改点
         return index_df
 
     # 如果直接获取失败，则尝试在本地合成
@@ -420,7 +422,8 @@ def _get_market_sentiment_data_ak(start_date: str, end_date: str, cache_dir: Pat
 
 # 公共 API 函数
 
-def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, prediction_mode: bool = False) -> Optional[pd.DataFrame]:
+def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, prediction_mode: bool = False, 
+                        market_breadth_df: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
     """
     为单个股票执行完整的特征生成流程，实现了：
     - 智能的、解耦 Tushare 的指数数据获取。
@@ -455,7 +458,6 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     # --- 1. 数据获取 ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
 
-    breadth_df = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
     sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
 
     external_market_df = None
@@ -477,15 +479,18 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
     if df is None: return None
 
-    benchmark_df = _get_index_data_bs(run_config.get('benchmark_ticker'), start_date_str, end_date_str, cache_dir)
-    industry_df = _get_index_data_bs(run_config.get('industry_etf'), start_date_str, end_date_str, cache_dir)
+    benchmark_ticker = run_config.get('benchmark_ticker')
+    industry_ticker = run_config.get('industry_etf')
+    
+    benchmark_df = _get_index_data_bs(benchmark_ticker, start_date_str, end_date_str, cache_dir, display_name="基准指数")
+    industry_df = _get_index_data_bs(industry_ticker, start_date_str, end_date_str, cache_dir, display_name=f"{keyword}的行业指数")
     
     factors_df = _get_fama_french_factors(start_date_str, end_date_str)
-    macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str)
+    macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str, config)
     
     # --- 2. 基础特征计算 ---
-    if breadth_df is not None:
-        df = df.join(breadth_df, how='left')
+    if market_breadth_df is not None:
+        df = df.join(market_breadth_df, how='left')
     if macro_df is not None: 
         df = pd.merge_asof(df, macro_df, left_index=True, right_index=True, direction='backward')
     if benchmark_df is not None:
@@ -512,6 +517,13 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
     label_col = run_config.get('label_column', 'label_alpha')
+
+    if label_col not in df.columns:
+        print(f"错误: 关键错误！在数据处理流程完成后，config中定义的标签列 '{label_col}' 未在最终的DataFrame中找到。")
+        print(f"      这通常意味着标签计算步骤失败或被意外覆盖。")
+        print(f"      当前的列名是: {df.columns.tolist()}")
+        return None # 中断流程，防止生成错误的缓存数据
+
     if label_col in df.columns: df.dropna(subset=[label_col], inplace=True)
     
     feature_cols = [col for col in df.columns if col != label_col and not col.startswith('future_')]
@@ -529,7 +541,7 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
 
 def process_all_from_config(config_path: str, tickers_to_generate: list = None) -> Dict[str, pd.DataFrame]:
     """
-    (已重构) 根据配置文件，为指定的股票列表生成特征。
+    根据配置文件，为指定的股票列表生成特征。
     如果 tickers_to_generate 为 None，则处理所有股票。
     """
     print("--- 开始批量特征生成 ---")
@@ -544,7 +556,20 @@ def process_all_from_config(config_path: str, tickers_to_generate: list = None) 
     except Exception as e:
         print(f"ERROR: Config file {config_path} not found or failed to parse: {e}"); return {}
     
-    # API 初始化应该由更高层（如 Notebook）管理，这里不再调用
+    # 1. 提前计算全局的数据时间范围
+    end_date_dt = pd.to_datetime(config['strategy_config']['end_date'])
+    lookback_years = config['strategy_config'].get('data_lookback_years', 10)
+    earliest_start_date_dt = pd.to_datetime(config['strategy_config']['earliest_start_date'])
+    target_start_date_dt = end_date_dt - pd.DateOffset(years=lookback_years)
+    start_date_dt = max(target_start_date_dt, earliest_start_date_dt)
+    start_date_str, end_date_str = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
+    
+    cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
+
+    # 2. 在循环开始前，只调用一次，生成全局的市场广度数据
+    print("\n--- 正在准备全局市场数据---")
+    breadth_df_global = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
+    print("--- 全局市场数据准备完毕 ---\n")
     
     results_df = {}
     stocks_to_process = config.get('stocks_to_process', [])
@@ -564,8 +589,9 @@ def process_all_from_config(config_path: str, tickers_to_generate: list = None) 
         if not ticker: 
             print(f"  - WARNNING: Skipping invalid config entry at index {i-1} (missing ticker)."); continue
         
-        df = get_full_feature_df(ticker, config, keyword)
+        df = get_full_feature_df(ticker, config, keyword, market_breadth_df=breadth_df_global)
         if df is not None: results_df[ticker] = df
+        time.sleep(0.2)
     
     print("--- Batch Feature Generation Process Finished ---")
     return results_df

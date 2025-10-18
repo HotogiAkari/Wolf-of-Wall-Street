@@ -105,10 +105,24 @@ class RawReturnLabelCalculator(FeaturePostprocessor):
             print("  - [Post-processing] (Fallback) Running: Raw Return Label Calculator...")
         run_config = {**self.config.get('global_settings', {}), **self.config.get('strategy_config', {})}
         horizon = run_config.get("labeling_horizon", 30)
-        label_col = run_config.get('label_column', 'label_alpha') 
+        
+        # 直接从 global_settings 读取，不再提供可能导致混淆的默认值
+        # 如果 config 中没有 label_column，就让它报错，因为这是一个关键配置
+        try:
+            label_col = self.config['global_settings']['label_column']
+        except KeyError:
+            print("错误: 在 global_settings 中未找到关键配置 'label_column'。无法计算标签。")
+            return df
+        # --- 修改结束 ---
+        
         df[label_col] = df['close'].pct_change(periods=horizon).shift(-horizon)
-        lower_bound, upper_bound = df[label_col].quantile(0.01), df[label_col].quantile(0.99)
-        df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
+        
+        # 对标签进行去极值处理
+        # 检查列是否存在，防止 pct_change 后全是 NaN
+        if label_col in df.columns and not df[label_col].isnull().all():
+            lower_bound, upper_bound = df[label_col].quantile(0.01), df[label_col].quantile(0.99)
+            df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
+            
         return df
 
 class CorrelationSelector(FeaturePostprocessor):
