@@ -1,7 +1,4 @@
 # 文件路径: data_process/get_data.py
-'''
-用于获取数据并计算特征
-'''
 import re
 import json
 import time
@@ -10,18 +7,13 @@ import numpy as np
 import pandas as pd
 import tushare as ts
 import baostock as bs
-import statsmodels.api as sm
+import yfinance as yf
 from pathlib import Path
 from typing import Dict, Optional
 from tqdm.autonotebook import tqdm
 from data_process import data_contracts
 from data_process import feature_calculators
-from statsmodels.regression.rolling import RollingOLS
-from data_process.feature_postprocessors import (
-    run_all_feature_postprocessors, 
-    AlphaLabelCalculator, 
-    RawReturnLabelCalculator
-)
+from data_process.feature_postprocessors import run_all_feature_postprocessors
 
 # --- 全局 API 实例 ---
 pro: Optional['ts.ProApi'] = None
@@ -107,6 +99,63 @@ def _get_api_ticker(ticker_from_config: str) -> str:
     if not market or not code: return ticker
     return f"{market}.{code}"
 
+def _generate_market_breadth_data(start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    计算并缓存全市场的广度指标。
+    应该在处理任何个股之前运行一次。
+    """
+    print("--- 开始生成市场广度数据 ---")
+    cache_file = cache_dir / f"market_breadth_{start_date}_{end_date}.pkl"
+    if cache_file.exists():
+        print(f"  - 正在从缓存加载市场广度数据: {cache_file}")
+        return pd.read_pickle(cache_file)
+
+    print("  - 正在获取指数成分股列表...")
+    # 此处以沪深300为例
+    rs_stocks = bs.query_hs300_stocks()
+    if rs_stocks.error_code != '0':
+        print(f"  - 错误: 无法获取沪深300成分股: {rs_stocks.error_msg}")
+        return None
+    
+    stock_codes = rs_stocks.get_data()['code'].tolist()
+    
+    all_closes = []
+    for code in tqdm(stock_codes, desc="下载成分股日线数据"):
+        df_stock = _get_ohlcv_data_bs(code, start_date, end_date, cache_dir)
+        if df_stock is not None and not df_stock.empty:
+            all_closes.append(df_stock['close'].rename(code))
+            
+    if not all_closes:
+        print("  - 错误: 未能下载任何成分股数据。")
+        return None
+        
+    closes_df = pd.concat(all_closes, axis=1)
+    returns_df = closes_df.pct_change().fillna(0)
+    
+    # 1. 计算 A/D Line (上涨/下跌线)
+    # 这是最经典的广度指标，衡量每日上涨股票数与下跌股票数的差值累加。
+    advances = (returns_df > 0).sum(axis=1)
+    declines = (returns_df < 0).sum(axis=1)
+    ad_line = (advances - declines).cumsum()
+    
+    # 2. 计算 NH-NL (新高-新低)
+    # 衡量创出N日新高的股票数与创出N日新低的股票数的差值。
+    rolling_high = closes_df.rolling(52*5).max() # 52周新高
+    rolling_low = closes_df.rolling(52*5).min()  # 52周新低
+    
+    new_highs = (closes_df >= rolling_high.shift(1)).sum(axis=1)
+    new_lows = (closes_df <= rolling_low.shift(1)).sum(axis=1)
+    nh_nl = (new_highs - new_lows).rolling(10).mean() # 取10日移动平均使其平滑
+
+    breadth_df = pd.DataFrame({
+        'market_ad_line': ad_line,
+        'market_nh_nl_10d_ma': nh_nl
+    })
+    
+    breadth_df.to_pickle(cache_file)
+    print(f"--- 市场广度数据已生成并缓存至 {cache_file} ---")
+    return breadth_df
+
 # 核心初始化与数据获取函数
 def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: Path, keyword: str = None) -> Optional[pd.DataFrame]:
     """
@@ -121,10 +170,10 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: P
         print(f"  - 正在从本地缓存加载 {display_name} 的原始日线数据...")
         return pd.read_pickle(cache_file_path)
 
-    print(f"  - [正在从 Baostock 下载 {display_name} 的日线行情...")
+    print(f"  - 正在从 Baostock 下载 {display_name} 的日线行情...")
     start_fmt, end_fmt = pd.to_datetime(start_date).strftime('%Y-%m-%d'), pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
-    api_call = lambda: bs.query_history_k_data_plus(ticker, "date,open,high,low,close,volume", start_date=start_fmt, end_date=end_fmt, frequency="d", adjustflag="2")
+    api_call = lambda: bs.query_history_k_data_plus(ticker, "date,open,high,low,close,volume", start_date=start_fmt, end_date=end_date, frequency="d", adjustflag="2")
     rs = _download_with_retry(api_call)
     
     if rs.error_code != '0':
@@ -212,6 +261,44 @@ def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_di
         print(f"    - ERROR: 在本地合成指数时发生未知错误: {e}")
         return None
 
+def _get_us_stock_data_yf(ticker: str, start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    使用 yfinance 库从 Yahoo Finance 获取美股等海外市场数据。
+    实现了与项目中其他数据获取函数一致的缓存逻辑和返回格式。
+    """
+    print(f"  - 正在为 {ticker} 获取美股数据...")
+    raw_cache_dir = cache_dir / "raw_us_ohlcv"
+    raw_cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file_path = raw_cache_dir / f"raw_{ticker}_{start_date}_{end_date}.pkl"
+
+    if cache_file_path.exists():
+        print(f"  - 正在从本地缓存加载 {ticker} 的美股数据...")
+        return pd.read_pickle(cache_file_path)
+
+    print(f"  - 正在从 Yahoo Finance 下载 {ticker} 的数据...")
+    try:
+        # yfinance 的 end 日期是“不包含”的，所以我们需要加一天来确保获取到 end_date 当天的数据
+        end_date_inclusive = (pd.to_datetime(end_date) + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
+        
+        df = yf.download(ticker, start=start_date, end=end_date_inclusive, progress=False)
+        
+        if df.empty:
+            print(f"  - 警告 [YF]: 未能获取到 {ticker} 在指定日期范围的数据。")
+            return None
+
+        # 格式化数据以匹配项目内部标准
+        df.columns = df.columns.str.lower()
+        df = df[['open', 'high', 'low', 'close', 'volume']]
+        
+        df.to_pickle(cache_file_path)
+        print(f"  - 信息: 已将 {ticker} 的数据缓存至 {cache_file_path}")
+        
+        return df
+
+    except Exception as e:
+        print(f"  - 错误 [YF]: 下载 {ticker} 数据时发生错误: {e}")
+        return None
+
 def _get_fama_french_factors(start_date: str, end_date: str) -> Optional[pd.DataFrame]:
     """(内部函数) 从 Tushare Pro 获取真实的法马-佛伦奇三因子数据。"""
     if pro is None: return None
@@ -260,52 +347,11 @@ def _get_macroeconomic_data_cn(start_date: str, end_date: str, config: dict) -> 
         print(f"    - WARNING: 获取宏观数据失败: {e}。将跳过此步骤。")
         return None
 
-def _calculate_alpha_label(df: pd.DataFrame, factors_df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
-    """
-    (已向量化) 使用 statsmodels 的 RollingOLS 高效计算 Alpha 标签。
-    """
-    print("  - 正在通过因子模型计算 Alpha 标签 (Vectorized)...")
-    
-    horizon = run_config.get("labeling_horizon", 30)
-    label_col = run_config.get('label_column', 'label_alpha')
-    
-    # 1. 准备数据
-    df_merged = df.join(factors_df, how='left')
-    df_merged['daily_excess_return'] = df_merged['close'].pct_change() - df_merged['rf']
-    df_merged['future_excess_return'] = df_merged['close'].pct_change(periods=horizon).shift(-horizon) - df_merged['rf']
-
-    factors = ['mkt_rf', 'smb', 'hml']
-    # 填充初始的 NaN，以确保 RollingOLS 的数据窗口是连续的
-    df_merged[factors + ['daily_excess_return']] = df_merged[factors + ['daily_excess_return']].fillna(0)
-
-    # 2. 使用 RollingOLS 计算滚动 Beta
-    rolling_window = 252
-    X_reg = sm.add_constant(df_merged[factors])
-    Y_reg = df_merged['daily_excess_return']
-    
-    # min_nobs 确保只有在窗口内有足够多的非空数据时才开始计算
-    rols = RollingOLS(Y_reg, X_reg, window=rolling_window, min_nobs=int(rolling_window * 0.8))
-    rres = rols.fit()
-    betas_df = rres.params.copy()
-
-    # 3. 计算 Alpha
-    # 预期超额收益 ≈ Beta(t) * 平均历史因子收益 * 周期长度
-    expected_return = (betas_df[factors] * df_merged[factors]).sum(axis=1) * horizon
-    
-    df[label_col] = df_merged['future_excess_return'] - expected_return
-
-    # 对计算出的 Alpha 进行去极值处理，以增强标签的稳定性
-    lower_bound = df[label_col].quantile(0.01)
-    upper_bound = df[label_col].quantile(0.99)
-    df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
-    
-    return df
-
 # 公共 API 函数
 
 def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, prediction_mode: bool = False) -> Optional[pd.DataFrame]:
     """
-    (最终完整版) 为单个股票执行完整的特征生成流程，实现了：
+    为单个股票执行完整的特征生成流程，实现了：
     - 智能的、解耦 Tushare 的指数数据获取。
     - 基于多因子模型的 Alpha 标签计算，并能优雅地回退。
     - 灵活的日期窗口策略（训练/预测/增量模式）。
@@ -337,32 +383,40 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     
     # --- 1. 数据获取 ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
+    breadth_df = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
+    spy_df = _get_us_stock_data_yf("SPY", start_date_str, end_date_str, cache_dir)
+    if spy_df is not None:
+        # 重命名列以避免与主数据冲突
+        spy_df.rename(columns={'close': 'close_ext', 'open': 'open_ext', 'volume': 'volume_ext'}, inplace=True)
+    
     df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
     if df is None: return None
+
+    benchmark_df = _get_index_data_bs(run_config.get('benchmark_ticker'), start_date_str, end_date_str, cache_dir)
+    industry_df = _get_index_data_bs(run_config.get('industry_etf'), start_date_str, end_date_str, cache_dir)
     
     factors_df = _get_fama_french_factors(start_date_str, end_date_str)
     macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str)
     
     # --- 2. 基础特征计算 ---
+    if breadth_df is not None:
+        df = df.join(breadth_df, how='left')
+        print("  - 信息: 已成功将市场广度数据合并到主数据框。")
     if macro_df is not None: 
         df = pd.merge_asof(df, macro_df, left_index=True, right_index=True, direction='backward')
+    if benchmark_df is not None:
+        df = df.join(benchmark_df['close'].rename('benchmark_close'), how='left')
+    if industry_df is not None:
+        df = df.join(industry_df['close'].rename('industry_close'), how='left')
         
     run_config_with_api = {**run_config, 'tushare_pro_instance': pro, 'ticker': ticker}
-    df = feature_calculators.run_all_feature_calculators(df, run_config_with_api)
+
+    extra_data_for_calc = {'external_market_df': spy_df}
+    df = feature_calculators.run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
     
     # --- 3. 特征后处理 ---
-    # 3.1 运行通用的后处理器 (平稳化, 特征选择等)
-    df = run_all_feature_postprocessors(df, run_config)
-    
-    # 3.2 运行有特殊依赖的标签计算器
-    if factors_df is not None:
-        label_calculator = AlphaLabelCalculator(run_config)
-        df = label_calculator.process(df, factors_df=factors_df)
-    else:
-        print("    - 警告: 无法加载因子数据, 将回退到计算原始收益率。")
-        label_calculator = RawReturnLabelCalculator(run_config)
-        df = label_calculator.process(df)
-        
+    # 运行通用的后处理器 (平稳化, 特征选择等)
+    df = run_all_feature_postprocessors(df, run_config, factors_df=factors_df)
     df.columns = df.columns.str.lower()
     
     # 4. --- 数据清洗和校验 ---

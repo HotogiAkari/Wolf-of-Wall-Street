@@ -1,7 +1,4 @@
 # 文件路径: data_process/data_contracts.py
-'''
-校验数据
-'''
 
 import numpy as np
 import pandas as pd
@@ -10,9 +7,7 @@ from scipy.stats import ks_2samp
 from pandera.typing import Series
 from typing import Any, Dict, List
 
-# ===================================================================
 # 1. 自定义校验函数 (Custom Checks)
-# ===================================================================
 
 def check_no_large_gaps(series: Series[pd.Timestamp]) -> bool:
     """
@@ -71,7 +66,7 @@ class DriftDetector:
         if ref_series.empty or new_series.empty:
             return 0.0
 
-        # --- 核心改进：使用 np.unique 处理重复的箱体边界 ---
+        # 使用 np.unique 处理重复的箱体边界
         breakpoints = np.quantile(ref_series, np.linspace(0, 1, bins + 1))
         breakpoints = np.unique(breakpoints) 
 
@@ -123,7 +118,7 @@ class DriftDetector:
         
         return drifted_features
 
-# 3. 统一的验证器接口 (Data Validator)
+# 3. 统一的验证器接口
 
 class DataValidator:
     """
@@ -131,6 +126,8 @@ class DataValidator:
     """
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        # --- 修改开始 ---
+        # 将 index 和 columns 的校验合并到一个 Schema 中
         self.schema = pa.DataFrameSchema(
             columns={
                 "open": pa.Column(float, required=True, checks=pa.Check(check_outlier_percentage)),
@@ -139,20 +136,18 @@ class DataValidator:
                 "close": pa.Column(float, required=True, checks=pa.Check(check_outlier_percentage)),
                 "volume": pa.Column(float, checks=[pa.Check.ge(0), pa.Check(check_outlier_percentage)], required=True),
                 "label_return": pa.Column(float, nullable=True, required=False),
-                "date": pa.Column(pd.Timestamp, required=True)
             },
-            index=pa.Index(int),
+            index=pa.Index(
+                pd.Timestamp, 
+                unique=True,
+                checks=[
+                    pa.Check(lambda s: s.is_monotonic_increasing, error="Time index is not monotonic increasing"),
+                    pa.Check(check_no_large_gaps, error="Large gaps found in time series index.")
+                ],
+                name="date"
+            ),
             strict=False,
             coerce=True,
-        )
-        self.time_index_schema = pa.SeriesSchema(
-            pd.Timestamp, 
-            unique=True,
-            checks=[
-                pa.Check(lambda s: s.is_monotonic_increasing, error="Time index is not monotonic increasing"),
-                pa.Check(check_no_large_gaps, error="Large gaps found in time series index.")
-            ],
-            name="date"
         )
 
     def validate_schema(self, df: pd.DataFrame) -> bool:
@@ -163,10 +158,7 @@ class DataValidator:
             return False
         
         try:
-            # 1. 校验时间索引
-            self.time_index_schema.validate(df.index.to_series())
-            # 2. 校验列数据
-            self.schema.validate(df.reset_index())
+            self.schema.validate(df)
             print("SUCCESS: 数据结构和时间索引验证通过.")
             return True
         except pa.errors.SchemaError as e:

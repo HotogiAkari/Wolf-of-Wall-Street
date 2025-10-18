@@ -4,8 +4,9 @@
 '''
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 from abc import ABC, abstractmethod
-from data_process.get_data import pro as tushare_pro_instance
+from statsmodels.regression.rolling import RollingOLS
 
 # --- 1. 定义所有特征计算器都必须遵循的标准接口 ---
 class FeatureCalculator(ABC):
@@ -306,7 +307,240 @@ class FundamentalCalculator(FeatureCalculator):
                 print(f"    - ERROR: Failed to get fundamental data from Tushare: {e}")
         
         return df
-    
+
+class RelativeStrengthCalculator(FeatureCalculator):
+    """
+    计算个股相对于基准/行业的相对强度和风险暴露(Beta)。
+    """
+    @property
+    def name(self) -> str:
+        return "Relative Strength & Beta Features"
+
+    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.config.get('global_settings', {}).get('verbose', True):
+            print(f"  - [Calculating Features] Running: {self.name}...")
+        
+        # 确保基准和行业数据存在
+        if 'benchmark_close' not in df.columns or 'industry_close' not in df.columns:
+            print(f"    - WARNNING: Missing 'benchmark_close' or 'industry_close' column. Skipping {self.name}.")
+            return df
+
+        window_sizes = self.config.get('stat_windows', [5, 10, 20])
+
+        # 1. 计算相对价格比率
+        # 用 fillna(method='ffill') 填充周末或节假日可能出现的缺失
+        df['price_vs_benchmark'] = (df['close'] / df['benchmark_close'].ffill()).fillna(method='ffill')
+        df['price_vs_industry'] = (df['close'] / df['industry_close'].ffill()).fillna(method='ffill')
+
+        # 2. 计算相对强度的动量 (RSI, Momentum)
+        # 这个指标衡量的是“超额表现”的趋势
+        for w in window_sizes:
+            df[f'relative_strength_momentum_bench_{w}d'] = df['price_vs_benchmark'].pct_change(periods=w)
+            df[f'relative_strength_momentum_ind_{w}d'] = df['price_vs_industry'].pct_change(periods=w)
+
+        # 3. 计算滚动的 Beta
+        # Beta衡量了股票相对于大盘的波动性风险。高Beta股在牛市可能涨得更多，熊市也跌得更狠。
+        stock_ret = df['close'].pct_change().fillna(0)
+        bench_ret = df['benchmark_close'].pct_change().fillna(0)
+        
+        # 使用过去约半年的数据计算 Beta
+        rolling_window = 120 
+        
+        # 准备 OLS 输入. X 是自变量(市场收益), Y 是因变量(个股收益)
+        # 我们需要处理好索引对齐问题
+        Y_reg = stock_ret
+        X_reg = sm.add_constant(bench_ret) # add_constant 增加截距项
+        
+        if len(df) > rolling_window:
+            rols = RollingOLS(endog=Y_reg, exog=X_reg, window=rolling_window, min_nobs=int(rolling_window * 0.8))
+            rres = rols.fit()
+            # rres.params 中包含 'const' (截距, 即Alpha) 和 'benchmark_close' (斜率, 即Beta)
+            df['beta_to_benchmark'] = rres.params['benchmark_close']
+        else:
+            df['beta_to_benchmark'] = np.nan
+
+        return df
+
+class MarketRegimeCalculator(FeatureCalculator):
+    """
+    根据基准指数的波动率来定义市场的宏观状态（例如，高波动 vs 低波动）。
+    """
+    @property
+    def name(self) -> str:
+        return "Market Regime Features"
+
+    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.config.get('global_settings', {}).get('verbose', True):
+            print(f"  - [Calculating Features] Running: {self.name}...")
+
+        if 'benchmark_close' not in df.columns:
+            print(f"    - WARNNING: Missing 'benchmark_close' column. Skipping {self.name}.")
+            return df
+        
+        # 1. 计算基准指数的短期和长期波动率
+        bench_ret = df['benchmark_close'].pct_change()
+        df['benchmark_vol_20d'] = bench_ret.rolling(20).std() * np.sqrt(252) # 短期 (月度)
+        df['benchmark_vol_60d'] = bench_ret.rolling(60).std() * np.sqrt(252) # 中期 (季度)
+
+        # 2. 定义市场状态
+        # 方法一: 是否处于高波动状态 (与长期中位数相比)
+        long_term_median_vol = df['benchmark_vol_60d'].rolling(252).median()
+        df['regime_is_high_vol'] = (df['benchmark_vol_20d'] > long_term_median_vol).astype(int)
+
+        # 方法二: 波动率的趋势 (短期波动率是否在上升)
+        df['regime_vol_trend_up'] = (df['benchmark_vol_20d'] > df['benchmark_vol_60d']).astype(int)
+
+        return df
+
+class AdvancedRiskCalculator(FeatureCalculator):
+    """
+    计算更高级的风险指标，如最大回撤 (Max Drawdown)。
+    """
+    @property
+    def name(self) -> str:
+        return "Advanced Risk Features"
+
+    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.config.get('global_settings', {}).get('verbose', True):
+            print(f"  - [Calculating Features] Running: {self.name}...")
+
+        window_sizes = self.config.get('stat_windows', [20, 60, 120]) # 月度、季度、半年度
+
+        for w in window_sizes:
+            # 1. 计算滚动窗口内的最高价
+            rolling_max = df['close'].rolling(window=w, min_periods=1).max()
+            
+            # 2. 计算当前价格相对于滚动最高价的回撤
+            # 公式: (当前价格 / 峰值) - 1。结果是一个负数或零。
+            daily_drawdown = (df['close'] / rolling_max) - 1.0
+            
+            # 3. 找到滚动窗口内的最大回撤
+            # 我们在一个新的滚动窗口内寻找之前计算的 daily_drawdown 的最小值
+            df[f'max_drawdown_{w}d'] = daily_drawdown.rolling(window=w, min_periods=1).min()
+
+        return df
+
+class CrossoverSignalCalculator(FeatureCalculator):
+    """
+    计算技术指标的交叉信号，如金叉和死叉。
+    这个计算器必须在 TechnicalIndicatorCalculator 之后运行。
+    """
+    @property
+    def name(self) -> str:
+        return "交叉信号特征 (金叉/死叉)"
+
+    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+        crossover_rules = self.config.get('crossover_signals', [])
+        if not crossover_rules:
+            print(f"  - [计算特征] 信息: 未在配置中指定交叉信号规则，跳过 {self.name}。")
+            return df
+        
+        print(f"  - [计算特征] 正在运行: {self.name}...")
+        
+        for rule in crossover_rules:
+            fast_col = rule.get('fast')
+            slow_col = rule.get('slow')
+            rule_name = rule.get('name')
+
+            if not all([fast_col, slow_col, rule_name]):
+                print(f"    - 警告: 交叉规则配置不完整，缺少 fast, slow 或 name。跳过此规则。")
+                continue
+
+            # 确保计算金叉/死叉所依赖的均线已经存在于DataFrame中
+            if fast_col not in df.columns or slow_col not in df.columns:
+                print(f"    - 警告: 无法计算 '{rule_name}'，因为依赖的列 '{fast_col}' 或 '{slow_col}' 不存在。")
+                print(f"    -      请确保它们已在 'technical_indicators' 配置中计算。")
+                continue
+            
+            # 计算信号
+            # 金叉条件: t-1 时 fast <= slow, 且 t 时 fast > slow
+            # 死叉条件: t-1 时 fast >= slow, 且 t 时 fast < slow
+            signal = np.zeros(len(df))
+            
+            # 使用 .iloc 避免 SettingWithCopyWarning
+            golden_cross_mask = (df[fast_col].iloc[1:] > df[slow_col].iloc[1:]) & (df[fast_col].iloc[:-1].values <= df[slow_col].iloc[:-1].values)
+            death_cross_mask = (df[fast_col].iloc[1:] < df[slow_col].iloc[1:]) & (df[fast_col].iloc[:-1].values >= df[slow_col].iloc[:-1].values)
+            
+            # np.where(condition, x, y)
+            # 将信号设置在交叉发生的当天
+            signal[1:] = np.where(golden_cross_mask, 1, np.where(death_cross_mask, -1, 0))
+
+            df[f'signal_{rule_name}'] = signal.astype(int)
+            print(f"    - 已计算: {rule_name} (金叉/死叉信号)")
+
+        return df
+
+class CandleQuantCalculator(FeatureCalculator):
+    """
+    对K线本身进行量化解构，提取更多维度的特征。
+    """
+    @property
+    def name(self) -> str:
+        return "K线量化解构特征"
+
+    def calculate(self, df: pd.DataFrame) -> pd.DataFrame:
+        print(f"  - [计算特征] 正在运行: {self.name}...")
+
+        # 1. K线在布林带中的位置
+        # 这个特征衡量了收盘价相对于近期波动区间的极端程度。
+        # 值接近1代表接近上轨（超买），接近0代表接近下轨（超卖）。
+        try:
+            bbands = df.ta.bbands(length=20)
+            # 为了避免除以零，处理布林带宽度为0的情况
+            bandwidth = (bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']).replace(0, 1e-9)
+            df['candle_pos_in_bbands'] = (df['close'] - bbands['BBL_20_2.0']) / bandwidth
+            df.drop(columns=['BBU_20_2.0', 'BBM_20_2.0', 'BBL_20_2.0', 'BBB_20_2.0', 'BBP_20_2.0'], inplace=True, errors='ignore')
+            print(f"    - 已计算: K线在布林带中的位置")
+        except Exception as e:
+            print(f"    - 警告: 计算布林带特征失败: {e}")
+
+        # 2. 波动率收缩/扩张
+        # 衡量今天的振幅（high-low）相对于过去一段时间平均振幅的大小。
+        # 正值表示波动放大，负值表示波动收缩。这常用于识别突破前的“蓄力”状态。
+        if 'range' not in df.columns: # 依赖 PriceStructureCalculator
+             df['range'] = df['high'] - df['low']
+        
+        avg_range = df['range'].rolling(10).mean().replace(0, 1e-9)
+        df['volatility_expansion_ratio'] = (df['range'] / avg_range) - 1.0
+        print(f"    - 已计算: 波动率扩张比率")
+        
+        # 3. 跳空缺口大小
+        # 衡量开盘价相对于昨日收盘价的跳空幅度。
+        # 正值是向上跳空，负值是向下跳空。强大的跳空通常预示着趋势的开始或延续。
+        gap = df['open'] - df['close'].shift(1)
+        df['gap_size_ratio'] = gap / df['close'].shift(1)
+        print(f"    - 已计算: 跳空缺口大小")
+
+        return df
+
+class IntermarketCorrelationCalculator(FeatureCalculator):
+    """
+    计算与外部市场（如美股SPY）的滚动相关性。
+    """
+    @property
+    def name(self) -> str:
+        return "跨市场关联特征"
+
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        # 这个计算器依赖于从kwargs传入的外部市场数据
+        external_market_df = kwargs.get('external_market_df')
+        if external_market_df is None:
+            print(f"  - [计算特征] 信息: 未提供外部市场数据，跳过 {self.name}。")
+            return df
+            
+        print(f"  - [计算特征] 正在运行: {self.name}...")
+        
+        stock_ret = df['close'].pct_change()
+        # 需要先合并再计算，以保证日期对齐
+        df_merged = pd.DataFrame({'stock_ret': stock_ret}).join(external_market_df)
+        df_merged['external_ret'] = df_merged['close_ext'].pct_change()
+        
+        # 计算60日（约3个月）的滚动相关系数
+        df['corr_with_external_60d'] = df_merged['stock_ret'].rolling(60).corr(df_merged['external_ret'])
+        print(f"    - 已计算: 与外部市场的60日滚动相关性")
+        
+        return df
+
 # 创建注册表和运行器
 ALL_CALCULATORS = [
     TechnicalIndicatorCalculator,
@@ -318,16 +552,23 @@ ALL_CALCULATORS = [
     TrendRegimeFeatureCalculator,
     MomentumVolatilityCalculator,
     FundamentalCalculator,
+    RelativeStrengthCalculator,
+    MarketRegimeCalculator,
+    AdvancedRiskCalculator,
+    CrossoverSignalCalculator, 
+    CandleQuantCalculator,
+    IntermarketCorrelationCalculator,
 ]
 
-def run_all_feature_calculators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def run_all_feature_calculators(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:
     """
     实例化并按顺序运行所有已注册的特征计算器。
     """
-    print("INFO: Starting feature calculation pipeline...")
+    print("INFO: 开始特征计算流水线...")
     df_copy = df.copy()
     for calculator_class in ALL_CALCULATORS:
         calculator = calculator_class(config)
-        df_copy = calculator.calculate(df_copy)
-    print("INFO: Feature calculation pipeline finished.")
+        # 将 kwargs 传递给每个 calculate 方法
+        df_copy = calculator.calculate(df_copy, **kwargs) 
+    print("INFO: 特征计算流水线结束。")
     return df_copy

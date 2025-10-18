@@ -75,16 +75,6 @@ technical_indicators:
   - name: "ichimoku"                # 一目均衡表 (未来支撑阻力与趋势云)
     params: {"tenkan": 9, "kijun": 26, "senkou": 52}
 
-
-# K 线形态配置 (用于捕捉短期反转结构)
-candlestick_patterns:
-  - "cdl_doji"                      # 十字星：犹豫信号，可能反转
-  - "cdl_hammer"                    # 锤子线：底部反转信号
-  - "cdl_engulfing"                 # 吞没形态：趋势切换信号
-  - "cdl_shootingstar"              # 流星线：顶部反转信号
-  - "cdl_morningstar"               # 晨星形态：底部反转信号
-  - "cdl_eveningstar"               # 黄昏星形态：顶部反转信号
-
 # --- 2. 策略与数据设定 ---
 # 这部分参数定义了数据范围, 验证方法和特征工程的核心逻辑. 
 strategy_config:
@@ -96,11 +86,11 @@ strategy_config:
   
   # Walk-Forward (滚动窗口) 验证策略
   train_window: 250             # 初始/滚动训练窗口的大小（交易日）. 
-  val_window: 30                # 验证窗口的大小，也作为每次滚动的步长（交易日）(训练模型的预测天数). 
+  val_window: 45                # 验证窗口的大小，也作为每次滚动的步长（交易日）(训练模型的预测天数). 
   
   # 特征工程参数
-  labeling_horizon: 30          # 定义标签的预测周期，即预测未来 N 天的收益率. 
-  correlation_window: 30        # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小. 
+  labeling_horizon: 45          # 定义标签的预测周期，即预测未来 N 天的收益率. 
+  correlation_window: 120        # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小. 
   correlation_threshold: 0.95   # 初步特征筛选的阈值. 如果两个特征的相关性绝对值高于此值，则会移除其中一个，以减少共线性. 
   ffill_limit: 10                # 前向填充缺失值的最大连续天数. 用于处理节假日等造成的少量数据空洞. 
   
@@ -115,11 +105,54 @@ strategy_config:
   
   # 为统计特征计算器提供窗口尺寸
   # 用于 StatisticalFeatureCalculator
-  stat_windows: [5, 10, 20, 60]     # [整数列表] 定义计算滑动统计特征时使用的多个窗口尺寸（单位：交易日）. 计算过去 x 日的收益率
+  stat_windows: [5, 10, 20, 30, 45, 60]     # [整数列表] 定义计算滑动统计特征时使用的多个窗口尺寸（单位：交易日）. 计算过去 x 日的收益率
   # 用于 TrendRegimeFeatureCalculator
-  trend_window: 30                  # [整数] 定义计算价格趋势斜率时使用的线性回归窗口大小（单位：交易日）. 值越大，捕捉的趋势越长；值越小，对短期趋势变化越敏感. 
+  trend_window: 45                  # [整数] 定义计算价格趋势斜率时使用的线性回归窗口大小（单位：交易日）. 值越大，捕捉的趋势越长；值越小，对短期趋势变化越敏感. 
   # 用于 MomentumVolatilityCalculator
   momentum_windows: [3, 6, 12]      # [整数列表] 定义计算动量/波动率类因子时使用的窗口期（单位：月）
+  # 配置K线形态 (用于 CandlestickPatternCalculator)
+  candlestick_patterns:
+    - "CDLDOJI"               # 十字星：犹豫信号，可能反转
+    - "CDLHAMMER"             # 锤子线：底部反转信号
+    - "CDLENGULFING"          # 吞没形态：趋势切换信号
+    - "CDLSHOOTINGSTAR"       # 流星线：顶部反转信号
+    - "CDLMORNINGSTAR"        # 晨星形态：底部反转信号
+    - "CDLEVENINGSTAR"        # 黄昏星形态：顶部反转信号
+
+    # 强力趋势与动量形态
+    - "CDL3WHITESOLDIERS"     # 三白兵：强烈的看涨反转/持续信号
+    - "CDL3BLACKCROWS"        # 三只乌鸦：强烈的看跌反转/持续信号
+    - "CDLMARUBOZU"           # 光头光脚：单方向的极致动量信号
+
+    # 趋势持续形态
+    - "CDLRISING3METHODS"     # 上升三法：强看涨持续信号
+    - "CDLFALLING3METHODS"    # 下降三法：强看跌持续信号
+    
+    # 经典反转形态
+    - "CDLHARAMI"             # 孕线形态：趋势动力减弱信号
+    - "CDLPIERCING"           # 刺透形态：底部反转信号
+    - "CDLDARKCLOUDCOVER"     # 乌云盖顶：顶部反转信号
+  # 配置技术指标 (用于 TechnicalIndicatorCalculator), 这是计算金叉/死叉的基础
+  technical_indicators:
+    - name: ema
+      params:
+        length: 50
+    - name: ema
+      params:
+        length: 200
+    - name: macd # MACD指标也可以用来做交叉信号
+      params:
+        fast: 12
+        slow: 26
+        signal: 9
+  # 配置交叉信号 (用于 CrossoverSignalCalculator)
+  crossover_signals:
+    - name: "ema_50_200"
+      fast: "ema_50"
+      slow: "ema_200"
+    - name: "macd_signal"
+      fast: "macd_12_26_9"
+      slow: "macds_12_26_9"
 
 # --- 3. HPO (超参数优化) 设定 ---
 hpo_config:
