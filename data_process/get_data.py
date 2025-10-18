@@ -10,49 +10,50 @@ import numpy as np
 import pandas as pd
 import tushare as ts
 import baostock as bs
+import statsmodels.api as sm
 from pathlib import Path
 from typing import Dict, Optional
+from tqdm.autonotebook import tqdm
 from data_process import data_contracts
 from data_process import feature_calculators
+from statsmodels.regression.rolling import RollingOLS
+from data_process.feature_postprocessors import (
+    run_all_feature_postprocessors, 
+    AlphaLabelCalculator, 
+    RawReturnLabelCalculator
+)
 
 # --- 全局 API 实例 ---
 pro: Optional['ts.ProApi'] = None
 bs_logged_in: bool = False
 
 # 公共 API 生命周期管理函数
-
 def initialize_apis(config: Dict):
-    """
-    (公共接口) 初始化所有数据 API。应在任何数据处理任务开始前调用。
-    """
+    """(公共接口) 初始化所有数据 API。"""
     global pro, bs_logged_in
-    
     if not bs_logged_in:
-        print("INFO: 尝试登陆 Baostock...")
+        print("INFO: 正在尝试登录 Baostock...")
         lg = bs.login()
-        if lg.error_code != '0':
-            raise ConnectionError(f"Baostock 登录失败: {lg.error_msg}")
-        bs_logged_in = True
-        print(f"INFO: Baostock API 登录成功。SDK版本: {bs.__version__}")
-    else:
-        print("INFO: Baostock API 已登陆.")
+        if lg.error_code != '0': raise ConnectionError(f"Baostock 登录失败: {lg.error_msg}")
+        bs_logged_in = True; print(f"INFO: Baostock API 登录成功。")
     
     if pro is None:
         token = config.get('global_settings', {}).get('tushare_api_token')
         if token and "TOKEN" not in token.upper():
             try:
-                ts.set_token(token)
-                pro = ts.pro_api()
-                print("INFO: Tushare Pro API 初始化成功。将尝试获取宏观数据。")
+                print("INFO: 正在尝试初始化 Tushare Pro API...")
+                pro = ts.pro_api(token)
+                pro.trade_cal(exchange='', start_date='20200101', end_date='20200101')
+                print("INFO: Tushare Pro API 初始化并验证成功。")
             except Exception as e:
-                print(f"WARNING: Tushare API 初始化失败: {e}。将跳过宏观数据获取。")
+                print(f"WARNNING: Tushare Pro API 初始化或验证失败: {e}。")
                 pro = None
         else:
-            print("INFO: 未在配置中提供有效的 Tushare Token。将跳过宏观数据获取。")
+            print("INFO: 未在配置中提供有效的 Tushare Token，将跳过 Tushare 相关数据。")
 
 def shutdown_apis():
     """
-    (公共接口) 安全地登出所有数据 API，并重置状态。应在所有数据处理任务结束后调用。
+    安全地登出所有数据 API，并重置状态。应在所有数据处理任务结束后调用。
     """
     global bs_logged_in
     
@@ -67,7 +68,6 @@ def shutdown_apis():
         print(f"WARNNING: 在 Baostock 登出时发生错误: {e}")
 
 # 内部辅助函数
-
 def _download_with_retry(api_call_func, max_retries=3, initial_delay=0.5):
     """
     一个通用的下载重试包装器，处理网络错误。
@@ -108,45 +108,20 @@ def _get_api_ticker(ticker_from_config: str) -> str:
     return f"{market}.{code}"
 
 # 核心初始化与数据获取函数
-
-def _initialize_apis(config: Dict):
-    """初始化API。"""
-    global pro, bs_logged_in
-    if not bs_logged_in:
-        lg = bs.login()
-        if lg.error_code != '0':
-            raise ConnectionError(f"Baostock 登录失败: {lg.error_msg}")
-        bs_logged_in = True
-        print(f"INFO: Baostock API 登录成功。SDK版本: {bs.__version__}")
-    
-    if pro is None:
-        token = config.get('global_settings', {}).get('tushare_api_token')
-        if token and "TOKEN" not in token.upper():
-            try:
-                ts.set_token(token)
-                pro = ts.pro_api()
-                print("INFO: Tushare Pro API 初始化成功。将尝试获取宏观数据。")
-            except Exception as e:
-                print(f"WARNING: Tushare API 初始化失败: {e}。将跳过宏观数据获取。")
-                pro = None
-        else:
-            print("INFO: 未在配置中提供有效的 Tushare Token。将跳过宏观数据获取。")
-
-def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, run_config: dict, keyword: str = None) -> Optional[pd.DataFrame]:
-    """[BS] 从 Baostock 获取日线行情数据，优先使用本地缓存 (含延迟和重试)。"""
+def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: Path, keyword: str = None) -> Optional[pd.DataFrame]:
+    """
+    (已简化) 从 Baostock 获取日线行情数据，只依赖直接的路径参数。
+    """
     display_name = keyword if keyword else ticker
-    cache_base_dir = Path(run_config.get("data_cache_dir", "data_cache"))
-    raw_cache_dir = cache_base_dir / run_config.get("raw_ohlcv_cache_dir", "raw_ohlcv")
+    raw_cache_dir = cache_dir / "raw_ohlcv"
     raw_cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    cache_filename = f"raw_{ticker}_{start_date}_{end_date}.pkl"
-    cache_file_path = raw_cache_dir / cache_filename
+    cache_file_path = raw_cache_dir / f"raw_{ticker}_{start_date}_{end_date}.pkl"
 
     if cache_file_path.exists():
-        print(f"  - [1/7] 正在从本地缓存加载 {display_name} 的原始日线数据...")
+        print(f"  - 正在从本地缓存加载 {display_name} 的原始日线数据...")
         return pd.read_pickle(cache_file_path)
 
-    print(f"  - [1/7] 正在从 Baostock 下载 {display_name} 的日线行情...")
+    print(f"  - [正在从 Baostock 下载 {display_name} 的日线行情...")
     start_fmt, end_fmt = pd.to_datetime(start_date).strftime('%Y-%m-%d'), pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
     api_call = lambda: bs.query_history_k_data_plus(ticker, "date,open,high,low,close,volume", start_date=start_fmt, end_date=end_fmt, frequency="d", adjustflag="2")
@@ -172,16 +147,96 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, run_config: 
     
     try:
         df.to_pickle(cache_file_path)
-        print(f"  - INFO: 已将 {display_name} 的原始数据缓存至 {cache_file_path}")
+        print(f"  - INFO: 已将 {display_name} 的数据缓存至 {cache_file_path}")
     except Exception as e:
-        print(f"  - WARNING: 无法将 {display_name} 的原始数据写入缓存: {e}")
+        print(f"  - WARNING: 无法缓存 {display_name} 的数据: {e}")
         
     return df[['open', 'high', 'low', 'close', 'volume']]
+
+def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    (新增) 优先从 Baostock 获取指数数据。如果失败，则获取成分股并在本地计算等权重指数。
+    """
+    print(f"  - INFO: 正在为指数 {index_code} 获取数据...")
+    
+    # 尝试直接获取指数数据
+    index_df = _get_ohlcv_data_bs(index_code, start_date, end_date, cache_dir, keyword=f"指数-{index_code}")
+    if index_df is not None and not index_df.empty:
+        print(f"    - SUCCESS: 已直接从 Baostock 获取到指数 {index_code} 的数据。")
+        return index_df
+
+    # 如果直接获取失败，则尝试在本地合成
+    print(f"    - WARNNING: 无法直接获取指数 {index_code}。将尝试在本地合成等权重指数...")
+    try:
+        # 1. 获取指数成分股
+        rs = bs.query_hs300_stocks() # 示例：获取沪深300成分股，可扩展
+        if rs.error_code != '0':
+            print(f"    - ERROR: 无法获取指数 {index_code} 的成分股: {rs.error_msg}")
+            return None
+        
+        constituents = rs.get_data()['code'].tolist()
+        print(f"    - INFO: 成功获取 {len(constituents)} 只成分股。开始下载成分股数据...")
+
+        # 2. 批量获取成分股的收盘价
+        all_closes = []
+        for stock_code in tqdm(constituents, desc=f"下载 {index_code} 成分股", leave=False):
+            stock_df = _get_ohlcv_data_bs(stock_code, start_date, end_date, cache_dir, keyword=stock_code)
+            if stock_df is not None:
+                all_closes.append(stock_df['close'].rename(stock_code))
+        
+        if not all_closes:
+            print("    - ERROR: 未能获取到任何成分股的数据。")
+            return None
+            
+        # 3. 合并所有收盘价，并计算等权重收益率
+        all_closes_df = pd.concat(all_closes, axis=1)
+        daily_returns = all_closes_df.pct_change().fillna(0)
+        
+        # 计算每日的等权重平均收益率
+        equal_weighted_return = daily_returns.mean(axis=1)
+        
+        # 4. 根据收益率序列，构建一个虚拟的指数净值序列
+        initial_value = 1000
+        index_series = initial_value * (1 + equal_weighted_return).cumprod()
+        
+        # 构建一个符合格式的 DataFrame
+        synthetic_index_df = pd.DataFrame({'close': index_series})
+        # 补全 OHLCV
+        synthetic_index_df['open'] = synthetic_index_df['high'] = synthetic_index_df['low'] = synthetic_index_df['close']
+        synthetic_index_df['volume'] = 0
+        
+        print(f"    - SUCCESS: 已在本地成功合成 {index_code} 的等权重指数。")
+        return synthetic_index_df
+
+    except Exception as e:
+        print(f"    - ERROR: 在本地合成指数时发生未知错误: {e}")
+        return None
+
+def _get_fama_french_factors(start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+    """(内部函数) 从 Tushare Pro 获取真实的法马-佛伦奇三因子数据。"""
+    if pro is None: return None
+    print("  - INFO: 正在从 Tushare Pro 加载法马-佛伦奇三因子数据...")
+    try:
+        start_date_ts = pd.to_datetime(start_date).strftime('%Y%m%d')
+        end_date_ts = pd.to_datetime(end_date).strftime('%Y%m%d')
+        factors_df = pro.fama_f3_factor(start_date=start_date_ts, end_date=end_date_ts)
+        if factors_df.empty:
+            print("    - WARNNING: Tushare 未返回任何因子数据。"); return None
+        
+        factors_df['date'] = pd.to_datetime(factors_df['trade_date'], format='%Y%m%d')
+        factors_df.set_index('date', inplace=True)
+        for col in ['mktrf', 'smb', 'hml']: factors_df[col] = factors_df[col] / 100
+        factors_df['rf'] = 0.02 / 252 # 假设年化无风险利率为 2%
+        factors_df = factors_df[['mktrf', 'smb', 'hml', 'rf']].rename(columns={'mktrf': 'mkt_rf'}).sort_index()
+        print(f"    - SUCCESS: 成功加载 {len(factors_df)} 条真实的因子数据。")
+        return factors_df
+    except Exception as e:
+        print(f"    - ERROR: 从 Tushare 获取因子数据失败: {e}"); return None
 
 def _get_macroeconomic_data_cn(start_date: str, end_date: str, config: dict) -> Optional[pd.DataFrame]:
     """[TS] (可选) 从 Tushare 获取中国宏观经济指标。"""
     if pro is None: return None
-    print("  - [2/7] 正在尝试从 Tushare 获取中国宏观经济数据...")
+    print("  - 正在尝试从 Tushare 获取中国宏观经济数据...")
     try:
         start_m = (pd.to_datetime(start_date) - pd.DateOffset(days=100)).strftime('%Y%m')
         end_m = pd.to_datetime(end_date).strftime('%Y%m')
@@ -205,172 +260,130 @@ def _get_macroeconomic_data_cn(start_date: str, end_date: str, config: dict) -> 
         print(f"    - WARNING: 获取宏观数据失败: {e}。将跳过此步骤。")
         return None
 
-def _add_relative_performance_features(df: pd.DataFrame, benchmark_df: pd.DataFrame, industry_df: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """[计算] 添加相对于市场和行业的表现特征。"""
-    print("  - [4/7] 正在添加相对表现特征...")
-    df = df.join(benchmark_df, how='left')
-    df = df.join(industry_df, how='left')
-    df['relative_strength_vs_benchmark'] = df['close'] / df['benchmark_close']
-    df['relative_strength_vs_industry'] = df['close'] / df['industry_close']
-    window = config.get("correlation_window", 30)
-    df['correlation_vs_benchmark'] = df['close'].pct_change().rolling(window).corr(df['benchmark_close'].pct_change())
-    df['correlation_vs_industry'] = df['close'].pct_change().rolling(window).corr(df['industry_close'].pct_change())
-    return df
-
-def _make_features_stationary(df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
-    """[计算] 对价格类特征进行平稳化处理。"""
-    print("  - [5/7] 正在对特征进行平稳化...")
-    cols_to_log_return = df.columns.intersection(['open', 'high', 'low', 'close', 'benchmark_close', 'industry_close', 'cpi', 'm2'])
-    for col in cols_to_log_return:
-        if col in df.columns: 
-            df[f'{col}_log_return'] = np.log(df[col] / df[col].shift(1))
-    return df
-
-def _create_and_clean_labels(df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
-    """[计算] 创建用于预测的标签，并进行降噪处理。"""
-    print("  - [6/7] 正在创建并降噪预测标签...")
+def _calculate_alpha_label(df: pd.DataFrame, factors_df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
+    """
+    (已向量化) 使用 statsmodels 的 RollingOLS 高效计算 Alpha 标签。
+    """
+    print("  - 正在通过因子模型计算 Alpha 标签 (Vectorized)...")
+    
     horizon = run_config.get("labeling_horizon", 30)
-    label_col = run_config.get('label_column', 'label_return')
-    df[label_col] = df['close'].pct_change(periods=horizon).shift(-horizon)
-    lower_bound, upper_bound = df[label_col].quantile(0.01), df[label_col].quantile(0.99)
-    df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
-    return df
+    label_col = run_config.get('label_column', 'label_alpha')
+    
+    # 1. 准备数据
+    df_merged = df.join(factors_df, how='left')
+    df_merged['daily_excess_return'] = df_merged['close'].pct_change() - df_merged['rf']
+    df_merged['future_excess_return'] = df_merged['close'].pct_change(periods=horizon).shift(-horizon) - df_merged['rf']
 
-def _initial_feature_selection(df: pd.DataFrame, run_config: dict) -> pd.DataFrame:
-    """[计算] 进行初步的特征筛选，剔除高度共线性的特征。"""
-    print("  - [7/7] 正在进行初步特征筛选...")
-    core_features = {'open', 'high', 'low', 'close', 'volume'}
-    numeric_df = df.select_dtypes(include=np.number)
-    features_to_check = [col for col in numeric_df.columns if col not in core_features]
-    if not features_to_check:
-        print("    - 没有非核心特征需要检查相关性。"); return df
-    corr_matrix = numeric_df[features_to_check].corr().abs()
-    upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    factors = ['mkt_rf', 'smb', 'hml']
+    # 填充初始的 NaN，以确保 RollingOLS 的数据窗口是连续的
+    df_merged[factors + ['daily_excess_return']] = df_merged[factors + ['daily_excess_return']].fillna(0)
+
+    # 2. 使用 RollingOLS 计算滚动 Beta
+    rolling_window = 252
+    X_reg = sm.add_constant(df_merged[factors])
+    Y_reg = df_merged['daily_excess_return']
     
-    threshold = run_config.get("correlation_threshold", 0.95)
+    # min_nobs 确保只有在窗口内有足够多的非空数据时才开始计算
+    rols = RollingOLS(Y_reg, X_reg, window=rolling_window, min_nobs=int(rolling_window * 0.8))
+    rres = rols.fit()
+    betas_df = rres.params.copy()
+
+    # 3. 计算 Alpha
+    # 预期超额收益 ≈ Beta(t) * 平均历史因子收益 * 周期长度
+    expected_return = (betas_df[factors] * df_merged[factors]).sum(axis=1) * horizon
     
-    to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > threshold)]
-    if to_drop:
-        df.drop(columns=to_drop, inplace=True, errors='ignore')
-        print(f"    - 移除了 {len(to_drop)} 个高相关性特征: {to_drop}")
-    else:
-        print("    - 未发现高相关性特征需要移除。")
+    df[label_col] = df_merged['future_excess_return'] - expected_return
+
+    # 对计算出的 Alpha 进行去极值处理，以增强标签的稳定性
+    lower_bound = df[label_col].quantile(0.01)
+    upper_bound = df[label_col].quantile(0.99)
+    df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
+    
     return df
 
 # 公共 API 函数
 
 def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, prediction_mode: bool = False) -> Optional[pd.DataFrame]:
     """
-    (最终版) 为单个股票执行完整的特征生成流程。
-    - prediction_mode=False (默认): 使用配置文件中的长期日期设置，用于训练。
-    - prediction_mode=True: 忽略配置文件的日期，自动获取近期数据，用于预测。
+    (最终完整版) 为单个股票执行完整的特征生成流程，实现了：
+    - 智能的、解耦 Tushare 的指数数据获取。
+    - 基于多因子模型的 Alpha 标签计算，并能优雅地回退。
+    - 灵活的日期窗口策略（训练/预测/增量模式）。
     """
     display_name = keyword if keyword else ticker
-    print(f"\n--- Generating features for {display_name} ({ticker}) ---")
+    print(f"\n--- 为 {display_name} ({ticker}) 生成特征 ---")
     
     global_settings = config.get('global_settings', {})
     strategy_config = config.get('strategy_config', {})
     stock_info = next((s for s in config.get('stocks_to_process', []) if s['ticker'] == ticker), {})
     run_config = {**global_settings, **strategy_config, **stock_info}
 
-    # --- 核心修正：根据模式选择日期计算逻辑 ---
-    if prediction_mode:
-        # 预测模式：只需要获取最近的一段数据即可计算所有特征
-        print("  - Running in Prediction Mode: Fetching recent data.")
-        end_date_dt = pd.Timestamp.now()
-        # 回溯大约 200 个交易日，足以计算所有常用指标
-        start_date_dt = end_date_dt - pd.DateOffset(days=300) 
-    else:
-        # 训练模式：使用配置文件中的混合日期策略
-        print("  - Running in Training Mode: Fetching historical data based on config.")
-        end_date_dt = pd.to_datetime(run_config.get('end_date'))
-        lookback_years = run_config.get('data_lookback_years', 10)
-        earliest_start_date_dt = pd.to_datetime(run_config.get('earliest_start_date', '2010-01-01'))
-        
-        if not end_date_dt or not earliest_start_date_dt:
-             print("ERROR: 'end_date' or 'earliest_start_date' not found in config for training mode.")
-             return None
+    runtime_start_date = run_config.get('earliest_start_date'); runtime_end_date = run_config.get('end_date')
 
+    if pd.notna(pd.to_datetime(runtime_start_date, errors='coerce')) and pd.notna(pd.to_datetime(runtime_end_date, errors='coerce')):
+        start_date_dt, end_date_dt = pd.to_datetime(runtime_start_date), pd.to_datetime(runtime_end_date)
+    elif prediction_mode:
+        end_date_dt, start_date_dt = pd.Timestamp.now(), pd.Timestamp.now() - pd.DateOffset(days=300)
+    else:
+        end_date_dt = pd.to_datetime(run_config.get('end_date'))
+        lookback_years, earliest_start_date_dt = run_config.get('data_lookback_years', 10), pd.to_datetime(run_config.get('earliest_start_date'))
+        if not end_date_dt or not earliest_start_date_dt: 
+            print("ERROR: 'end_date' or 'earliest_start_date' not found."); return None
         target_start_date_dt = end_date_dt - pd.DateOffset(years=lookback_years)
         start_date_dt = max(target_start_date_dt, earliest_start_date_dt)
     
-    start_date_str = start_date_dt.strftime('%Y-%m-%d')
-    end_date_str = end_date_dt.strftime('%Y-%m-%d')
+    start_date_str, end_date_str = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
+    print(f"  - 数据窗口: {start_date_str} to {end_date_str}")
     
-    print(f"  - Data window: Requesting data from {start_date_str} to {end_date_str}.")
-
-    # --- 2. 准备 API 参数 ---
-    benchmark_ticker = run_config.get('benchmark_ticker')
-    industry_etf_ticker = run_config.get('industry_etf')
-
-    if not benchmark_ticker or not industry_etf_ticker:
-        print(f"ERROR: Missing 'benchmark_ticker' or 'industry_etf' for {display_name}.")
-        return None
-
-    api_ticker = _get_api_ticker(ticker)
-    api_benchmark = _get_api_ticker(benchmark_ticker)
-    api_industry = _get_api_ticker(industry_etf_ticker)
-
-    # --- 3. 数据获取 ---
-    df = _get_ohlcv_data_bs(api_ticker, start_date_str, end_date_str, run_config)
-    if df is None or df.empty:
-        print(f"  - WARNNING: No data returned for {display_name} in the requested window. Skipping.")
-        return None
+    # --- 1. 数据获取 ---
+    cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
+    df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
+    if df is None: return None
     
-    print(f"  - INFO: Received data for {display_name} from {df.index.min().date()} to {df.index.max().date()}.")
-
-    # --- 4. 特征工程流水线 (所有后续步骤保持不变) ---
+    factors_df = _get_fama_french_factors(start_date_str, end_date_str)
+    macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str)
     
-    # 4.1 宏观数据
-    macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str, run_config)
-    if macro_df is not None and not macro_df.empty:
-        df = pd.merge_asof(df.sort_index(), macro_df.sort_index(), left_index=True, right_index=True, direction='backward')
-    
-    # 4.2 技术/日历特征
-    df = feature_calculators.run_all_feature_calculators(df, run_config)
-    
-    # 4.3 相对表现特征
-    bench_df_raw = _get_ohlcv_data_bs(api_benchmark, start_date_str, end_date_str, run_config)
-    if bench_df_raw is None:
-        print(f"ERROR: Could not get benchmark data for {display_name}. Aborting."); return None
-    bench_df = bench_df_raw['close'].rename('benchmark_close')
-
-    ind_df_raw = _get_ohlcv_data_bs(api_industry, start_date_str, end_date_str, run_config)
-    if ind_df_raw is None:
-        print(f"WARNNING: Could not get industry data for {display_name}. Using benchmark as fallback.")
-        ind_df = bench_df_raw['close'].rename('industry_close')
-    else:
-        ind_df = ind_df_raw['close'].rename('industry_close')
+    # --- 2. 基础特征计算 ---
+    if macro_df is not None: 
+        df = pd.merge_asof(df, macro_df, left_index=True, right_index=True, direction='backward')
         
-    df = _add_relative_performance_features(df, bench_df, ind_df, run_config)
+    run_config_with_api = {**run_config, 'tushare_pro_instance': pro, 'ticker': ticker}
+    df = feature_calculators.run_all_feature_calculators(df, run_config_with_api)
     
-    # 4.4 平稳化、标签创建、初步筛选
-    df = _make_features_stationary(df, run_config)
-    df = _create_and_clean_labels(df, run_config)
-    df = _initial_feature_selection(df, run_config)
+    # --- 3. 特征后处理 ---
+    # 3.1 运行通用的后处理器 (平稳化, 特征选择等)
+    df = run_all_feature_postprocessors(df, run_config)
     
+    # 3.2 运行有特殊依赖的标签计算器
+    if factors_df is not None:
+        label_calculator = AlphaLabelCalculator(run_config)
+        df = label_calculator.process(df, factors_df=factors_df)
+    else:
+        print("    - 警告: 无法加载因子数据, 将回退到计算原始收益率。")
+        label_calculator = RawReturnLabelCalculator(run_config)
+        df = label_calculator.process(df)
+        
     df.columns = df.columns.str.lower()
     
-    # --- 5. 数据清洗 ---
+    # 4. --- 数据清洗和校验 ---
     ffill_limit = run_config.get("ffill_limit", 5)
     df.ffill(inplace=True, limit=ffill_limit)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    label_col = run_config.get('label_column', 'label_return')
+    label_col = run_config.get('label_column', 'label_alpha')
     if label_col in df.columns: df.dropna(subset=[label_col], inplace=True)
     
-    feature_cols = [col for col in df.columns if col != label_col]
+    feature_cols = [col for col in df.columns if col != label_col and not col.startswith('future_')]
     df.dropna(subset=feature_cols, inplace=True)
     
     if df.empty: 
-        print(f"WARNNING: DataFrame is empty for {display_name} after all processing."); return None
+        print(f"警告: {display_name} 的 DataFrame 在处理后为空。"); return None
     
-    # --- 6. 数据校验 ---
     validator = data_contracts.DataValidator(run_config)
-    if not validator.validate_schema(df):
-        print(f"ERROR: Final data validation failed for {display_name}. Aborting."); return None
+    if not validator.validate_schema(df): 
+        print(f"错误: {display_name} 的最终数据校验失败。"); return None
         
-    print(f"--- SUCCESS: Features generated for {display_name}. Shape: {df.shape} ---")
+    print(f"--- 成功为 {display_name} 生成特征. 维度: {df.shape} ---")
     return df
 
 def process_all_from_config(config_path: str, tickers_to_generate: list = None) -> Dict[str, pd.DataFrame]:
