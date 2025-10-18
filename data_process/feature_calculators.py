@@ -541,6 +541,36 @@ class IntermarketCorrelationCalculator(FeatureCalculator):
         
         return df
 
+class LiquidityAndFlowCalculator(FeatureCalculator):
+    """
+    计算流动性与资金流冲击相关的特征。
+    """
+    @property
+    def name(self) -> str:
+        return "流动性与资金流特征"
+
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        print(f"  - [计算特征] 正在运行: {self.name}...")
+
+        # 1. 计算 Amihud 非流动性指标
+        daily_return_abs = df['close'].pct_change().abs()
+        # 使用成交额 (volume * close) 更准确，避免低价股的成交量失真
+        turnover = df['volume'] * df['close']
+        
+        # 加上一个极小值防止除以零
+        df['amihud_illiquidity'] = daily_return_abs / (turnover + 1e-9)
+        # 取30日移动平均使其更平滑，观察趋势
+        df['amihud_illiquidity_30d_ma'] = df['amihud_illiquidity'].rolling(30).mean()
+        print(f"    - 已计算: Amihud 非流动性指标")
+
+        # 2. 计算成交量 Z-Score
+        vol_mean_60d = df['volume'].rolling(60).mean()
+        vol_std_60d = df['volume'].rolling(60).std().replace(0, 1e-9) # 防止除以零
+        df['volume_zscore_60d'] = (df['volume'] - vol_mean_60d) / vol_std_60d
+        print(f"    - 已计算: 60日成交量 Z-Score")
+
+        return df
+    
 # 创建注册表和运行器
 ALL_CALCULATORS = [
     TechnicalIndicatorCalculator,
@@ -558,6 +588,7 @@ ALL_CALCULATORS = [
     CrossoverSignalCalculator, 
     CandleQuantCalculator,
     IntermarketCorrelationCalculator,
+    LiquidityAndFlowCalculator,
 ]
 
 def run_all_feature_calculators(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:

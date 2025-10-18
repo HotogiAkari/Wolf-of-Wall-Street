@@ -6,6 +6,7 @@ import yaml
 import numpy as np
 import pandas as pd
 import tushare as ts
+import akshare as ak
 import baostock as bs
 import yfinance as yf
 from pathlib import Path
@@ -124,6 +125,7 @@ def _generate_market_breadth_data(start_date: str, end_date: str, cache_dir: Pat
         df_stock = _get_ohlcv_data_bs(code, start_date, end_date, cache_dir)
         if df_stock is not None and not df_stock.empty:
             all_closes.append(df_stock['close'].rename(code))
+        time.sleep(0.1)
             
     if not all_closes:
         print("  - 错误: 未能下载任何成分股数据。")
@@ -261,10 +263,19 @@ def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_di
         print(f"    - ERROR: 在本地合成指数时发生未知错误: {e}")
         return None
 
-def _get_us_stock_data_yf(ticker: str, start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
+def _get_us_stock_data_yf(ticker: str, start_date: str, end_date: str, cache_dir: Path, 
+                          max_retries: int = 3, initial_delay: float = 0.5) -> Optional[pd.DataFrame]:
     """
     使用 yfinance 库从 Yahoo Finance 获取美股等海外市场数据。
-    实现了与项目中其他数据获取函数一致的缓存逻辑和返回格式。
+    集成了缓存逻辑和带指数退避的重试机制。
+    
+    :param ticker: 股票代码 (例如 "SPY")
+    :param start_date: 开始日期 (YYYY-MM-DD)
+    :param end_date: 结束日期 (YYYY-MM-DD)
+    :param cache_dir: 缓存目录
+    :param max_retries: 最大重试次数
+    :param initial_delay: 初始等待时间（秒），每次重试后会加倍
+    :return: 包含 OHLCV 数据的 DataFrame 或 None
     """
     print(f"  - 正在为 {ticker} 获取美股数据...")
     raw_cache_dir = cache_dir / "raw_us_ohlcv"
@@ -273,31 +284,56 @@ def _get_us_stock_data_yf(ticker: str, start_date: str, end_date: str, cache_dir
 
     if cache_file_path.exists():
         print(f"  - 正在从本地缓存加载 {ticker} 的美股数据...")
-        return pd.read_pickle(cache_file_path)
+        try:
+            return pd.read_pickle(cache_file_path)
+        except Exception as e:
+            print(f"  - 警告: 从缓存加载 {ticker} 数据失败 ({e})，将尝试重新下载。")
+            # 如果缓存文件损坏，删除并重新下载
+            cache_file_path.unlink(missing_ok=True) 
 
     print(f"  - 正在从 Yahoo Finance 下载 {ticker} 的数据...")
-    try:
-        # yfinance 的 end 日期是“不包含”的，所以我们需要加一天来确保获取到 end_date 当天的数据
-        end_date_inclusive = (pd.to_datetime(end_date) + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
-        
-        df = yf.download(ticker, start=start_date, end=end_date_inclusive, progress=False)
-        
-        if df.empty:
-            print(f"  - 警告 [YF]: 未能获取到 {ticker} 在指定日期范围的数据。")
-            return None
+    
+    retries = 0
+    delay = initial_delay
+    df = pd.DataFrame() # 初始化一个空 DataFrame
 
-        # 格式化数据以匹配项目内部标准
-        df.columns = df.columns.str.lower()
-        df = df[['open', 'high', 'low', 'close', 'volume']]
+    while retries < max_retries:
+        try:
+            # yfinance 的 end 日期是“不包含”的，所以我们需要加一天来确保获取到 end_date 当天的数据
+            end_date_inclusive = (pd.to_datetime(end_date) + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
+            
+            # 核心下载调用
+            df = yf.download(ticker, start=start_date, end=end_date_inclusive, progress=False)
+            
+            if df.empty:
+                # yfinance 可能返回空 DataFrame，这也被视为下载失败
+                raise ValueError(f"yfinance returned an empty DataFrame for {ticker}.")
+            
+            # 如果成功，跳出重试循环
+            break 
+
+        except Exception as e:
+            retries += 1
+            print(f"  - 警告 [YF]: 下载 {ticker} 数据失败 (尝试 {retries}/{max_retries}). "
+                  f"将在 {delay:.2f} 秒后重试. 错误: {e}")
+            time.sleep(delay)
+            delay *= 2 # 指数退避
+
+    if df.empty:
+        print(f"  - 错误 [YF]: 下载 {ticker} 数据在 {max_retries} 次尝试后仍失败。")
+        return None
         
+    # 格式化数据以匹配项目内部标准
+    df.columns = df.columns.str.lower()
+    df = df[['open', 'high', 'low', 'close', 'volume']]
+    
+    try:
         df.to_pickle(cache_file_path)
         print(f"  - 信息: 已将 {ticker} 的数据缓存至 {cache_file_path}")
-        
-        return df
-
     except Exception as e:
-        print(f"  - 错误 [YF]: 下载 {ticker} 数据时发生错误: {e}")
-        return None
+        print(f"  - 警告: 无法缓存 {ticker} 的数据: {e}")
+        
+    return df
 
 def _get_fama_french_factors(start_date: str, end_date: str) -> Optional[pd.DataFrame]:
     """(内部函数) 从 Tushare Pro 获取真实的法马-佛伦奇三因子数据。"""
@@ -347,6 +383,41 @@ def _get_macroeconomic_data_cn(start_date: str, end_date: str, config: dict) -> 
         print(f"    - WARNING: 获取宏观数据失败: {e}。将跳过此步骤。")
         return None
 
+def _get_market_sentiment_data_ak(start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    (新增) 使用 akshare 获取中国市场的情绪指标，如中国波指(iVIX)。
+    """
+    print("--- 正在获取市场情绪数据 (恐慌指数) ---")
+    cache_file = cache_dir / f"market_sentiment_{start_date}_{end_date}.pkl"
+    if cache_file.exists():
+        print(f"  - 正在从缓存加载市场情绪数据...")
+        return pd.read_pickle(cache_file)
+
+    try:
+        # akshare 的日期格式是 YYYYMMDD
+        start_ak = pd.to_datetime(start_date).strftime('%Y%m%d')
+        end_ak = pd.to_datetime(end_date).strftime('%Y%m%d')
+        
+        # 获取中国波动率指数 (iVIX)
+        vix_df = ak.idx_ivix(start_date=start_ak, end_date=end_ak)
+        if vix_df.empty:
+            print("  - 警告: 未能从 akshare 获取到中国波指(iVIX)数据。")
+            return None
+
+        vix_df['date'] = pd.to_datetime(vix_df['日期'])
+        vix_df.set_index('date', inplace=True)
+        
+        # 我们只关心收盘价
+        sentiment_df = vix_df[['收盘']].rename(columns={'收盘': 'china_vix'})
+        
+        sentiment_df.to_pickle(cache_file)
+        print(f"--- 市场情绪数据已生成并缓存。")
+        return sentiment_df
+        
+    except Exception as e:
+        print(f"  - 错误 [akshare]: 获取市场情绪数据失败: {e}")
+        return None
+
 # 公共 API 函数
 
 def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, prediction_mode: bool = False) -> Optional[pd.DataFrame]:
@@ -383,11 +454,25 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     
     # --- 1. 数据获取 ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
+
     breadth_df = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
-    spy_df = _get_us_stock_data_yf("SPY", start_date_str, end_date_str, cache_dir)
-    if spy_df is not None:
-        # 重命名列以避免与主数据冲突
-        spy_df.rename(columns={'close': 'close_ext', 'open': 'open_ext', 'volume': 'volume_ext'}, inplace=True)
+    sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
+
+    external_market_df = None
+    # 从 run_config 中读取外部市场列表，如果不存在则默认为空列表
+    external_tickers = run_config.get('external_market_tickers', [])
+    if not external_tickers:
+        print("  - 信息: 未在配置中找到 'external_market_tickers'，将跳过跨市场特征计算。")
+    else:
+        # 为了保持当前逻辑不变，我们暂时只使用列表中的第一个 ticker
+        # 未来可以扩展为循环处理所有 tickers
+        ext_ticker = external_tickers[0]
+        print(f"  - 信息: 正在根据配置获取外部市场数据: {ext_ticker}")
+        
+        external_market_df = _get_us_stock_data_yf(ext_ticker, start_date_str, end_date_str, cache_dir)
+        if external_market_df is not None:
+            # 重命名列以避免与主数据冲突
+            external_market_df.rename(columns={'close': 'close_ext', 'open': 'open_ext', 'volume': 'volume_ext'}, inplace=True)
     
     df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
     if df is None: return None
@@ -401,17 +486,19 @@ def get_full_feature_df(ticker: str, config: Dict, keyword: str = None, predicti
     # --- 2. 基础特征计算 ---
     if breadth_df is not None:
         df = df.join(breadth_df, how='left')
-        print("  - 信息: 已成功将市场广度数据合并到主数据框。")
     if macro_df is not None: 
         df = pd.merge_asof(df, macro_df, left_index=True, right_index=True, direction='backward')
     if benchmark_df is not None:
         df = df.join(benchmark_df['close'].rename('benchmark_close'), how='left')
     if industry_df is not None:
         df = df.join(industry_df['close'].rename('industry_close'), how='left')
+    if sentiment_df is not None:
+        df = df.join(sentiment_df, how='left')
+        df['china_vix'] = df['china_vix'].ffill()
         
     run_config_with_api = {**run_config, 'tushare_pro_instance': pro, 'ticker': ticker}
 
-    extra_data_for_calc = {'external_market_df': spy_df}
+    extra_data_for_calc = {'external_market_df': external_market_df}
     df = feature_calculators.run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
     
     # --- 3. 特征后处理 ---
