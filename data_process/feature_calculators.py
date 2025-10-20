@@ -589,6 +589,59 @@ class LiquidityAndFlowCalculator(FeatureCalculator):
 
         return df
     
+class ContextualFeatureCalculator(FeatureCalculator):
+    """
+    情景感知与交叉特征计算器。
+    负责定义市场的宏观状态（牛/熊市，高/低波动），并创建交叉特征。
+    这个计算器应该在大多数基础技术指标计算之后运行。
+    """
+    @property
+    def name(self) -> str:
+        return "Contextual & Cross-Sectional Features"
+
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        print(f"  - [Calculating Features] Running: {self.name}...")
+
+        if 'benchmark_close' not in df.columns:
+            print(f"    - WARNNING: Missing 'benchmark_close' column. Skipping {self.name}.")
+            return df
+        
+        # --- 1. 定义宏观市场状态 (Regimes) ---
+        
+        # a) 市场趋势状态 (牛市 vs 熊市)
+        # 使用长期均线来定义，例如 200 日线
+        df['regime_is_uptrend'] = (df['benchmark_close'] > df['benchmark_close'].rolling(200).mean()).astype(int)
+        print("    - Calculated: Market Trend Regime (Uptrend/Downtrend)")
+
+        # b) 市场波动率状态 (高波 vs 低波)
+        # 这个在 MarketRegimeCalculator 中已经计算了，我们在这里可以直接使用或重新计算以保证独立性
+        if 'regime_is_high_vol' not in df.columns:
+            bench_ret = df['benchmark_close'].pct_change()
+            vol_60d = bench_ret.rolling(60).std()
+            long_term_median_vol = vol_60d.rolling(252).median()
+            df['regime_is_high_vol'] = (vol_60d > long_term_median_vol).astype(int)
+            print("    - Calculated: Market Volatility Regime (High/Low Vol)")
+
+        # --- 2. 创建交叉特征 ---
+        # 我们的假设是：某些指标在不同的市场状态下，含义是不同的。
+        
+        # a) 将 RSI 与趋势状态交叉
+        if 'rsi_14' in df.columns: # 假设 RSI 列名是 pandas-ta 默认生成的
+            df['rsi_x_uptrend'] = df['rsi_14'] * df['regime_is_uptrend']
+            print("    - Created Cross-Feature: RSI x Trend Regime")
+            
+        # b) 将动量指标 (以 ROC 为例) 与波动率状态交叉
+        if 'roc_10' in df.columns:
+            df['roc_x_high_vol'] = df['roc_10'] * df['regime_is_high_vol']
+            print("    - Created Cross-Feature: ROC x Volatility Regime")
+
+        # c) 将成交量变化与趋势状态交叉
+        if 'volume_change' in df.columns:
+            df['vol_change_x_uptrend'] = df['volume_change'] * df['regime_is_uptrend']
+            print("    - Created Cross-Feature: Volume Change x Trend Regime")
+            
+        return df
+
 # 创建注册表和运行器
 ALL_CALCULATORS = [
     TechnicalIndicatorCalculator,
@@ -607,6 +660,7 @@ ALL_CALCULATORS = [
     CandleQuantCalculator,
     IntermarketCorrelationCalculator,
     LiquidityAndFlowCalculator,
+    ContextualFeatureCalculator,
 ]
 
 def run_all_feature_calculators(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:

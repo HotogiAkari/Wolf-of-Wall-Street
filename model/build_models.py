@@ -14,16 +14,18 @@ from typing import Any, Dict, List, Optional
 
 try:
     from data_process import get_data
-    from model_builders.lgbm_builder import LGBMBuilder
-    from model_builders.lstm_builder import LSTMBuilder
+    from model.builders.lgbm_builder import LGBMBuilder
+    from model.builders.lstm_builder import LSTMBuilder
+    from model.builders.tabtransformer_builder import TabTransformerBuilder
 except ImportError:
     print("WARNNING: 标准导入失败. 正在尝试将项目根目录添加到 sys.path.")
     project_root = str(Path(__file__).resolve().parents[1])
     if project_root not in sys.path:
         sys.path.append(project_root)
     from data_process import get_data
-    from model_builders.lgbm_builder import LGBMBuilder
-    from model_builders.lstm_builder import LSTMBuilder
+    from model.builders.lgbm_builder import LGBMBuilder
+    from model.builders.lstm_builder import LSTMBuilder
+    from model.builders.tabtransformer_builder import TabTransformerBuilder
 
 def walk_forward_split(df: pd.DataFrame, config: dict) -> list:
     if not isinstance(df.index, pd.DatetimeIndex): raise TypeError("Input DataFrame must have a DatetimeIndex.")
@@ -100,7 +102,10 @@ def run_training_for_ticker(
         print("INFO: 未检测到现有进度或完整模型，将从头开始全新训练。")
         start_fold_idx = 0
 
-    builder_map = {'lgbm': LGBMBuilder, 'lstm': LSTMBuilder}
+    builder_map = {'lgbm': LGBMBuilder, 
+                   'lstm': LSTMBuilder,
+                   'tabtransformer': TabTransformerBuilder
+                   }
     builder = builder_map[model_type](config)
     
     if not preprocessed_folds:

@@ -90,16 +90,24 @@ class LSTMBuilder:
         dates_val_seq = cached_data['dates_val_seq']
 
         if X_train_tensor.shape[0] == 0 or X_val_tensor.shape[0] == 0:
-            return {'model_state_dict': None}, pd.DataFrame(), pd.DataFrame(), {}
+            return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
+        
+        # --- 诊断步骤 ---
+        if not torch.all(torch.isfinite(X_train_tensor)):
+            print("FATAL: 训练数据 X_train_tensor 中包含 inf/nan！跳过此 fold。")
+            return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
+        if not torch.all(torch.isfinite(y_train_tensor)):
+            print("FATAL: 训练标签 y_train_tensor 中包含 inf/nan！跳过此 fold。")
+            return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
 
         p = self.lstm_params
         batch_size = p.get('batch_size', 128)
         num_workers = p.get('num_workers', 0)
         
-        train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-        train_loader = DataLoader(
+        train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
+        train_loader = torch.utils.data.DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True,
-            num_workers=num_workers, pin_memory=True, drop_last=True
+            num_workers=num_workers, pin_memory=(self.device=='cuda'), drop_last=True
         )
         
         model = LSTMModel(
@@ -108,22 +116,20 @@ class LSTMBuilder:
             hidden_size_2=p.get('units_2', 32),
             dropout=p.get('dropout', 0.2)
         ).to(self.device)
-        
-        model = model.to(dtype=X_train_tensor.dtype)
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
         
-        # float32 模式下才考虑开启 AMP (现在 L3 缓存决定了类型，保留此逻辑备用)
-        use_amp = (p.get('precision', 32) == 16) and (X_train_tensor.dtype == torch.float32)
-        scaler_amp = torch.amp.GradScaler(enabled=use_amp)
+        # (核心修复) use_amp 的定义现在更简单
+        use_amp = (p.get('precision', 32) == 16) and (self.device == 'cuda')
+        scaler_amp = torch.cuda.amp.GradScaler(enabled=use_amp)
 
         best_val_loss, patience_counter, best_model_state = float('inf'), 0, None
         patience = p.get('early_stopping_rounds_lstm', 50)
         epochs = p.get('epochs', 100)
         
-        epoch_iterator = tqdm(range(epochs), desc="    - Epochs", leave=False, disable=not self.verbose)
+        epoch_iterator = tqdm(range(epochs), desc="    - Epochs (LSTM)", leave=False, disable=not self.verbose)
         
         for epoch in epoch_iterator:
             model.train()
@@ -131,52 +137,67 @@ class LSTMBuilder:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 optimizer.zero_grad(set_to_none=True)
                 
-                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
+                with torch.cuda.amp.autocast(enabled=use_amp):
                     outputs = model(X_batch)
                     loss = criterion(outputs, y_batch)
                 
-                # 如果不使用 AMP，则直接反向传播
+                if not torch.isfinite(loss):
+                    print(f"FATAL: Epoch {epoch}, 训练损失变为 {loss.item()}！训练提前终止。")
+                    patience_counter = patience
+                    break
+
                 if use_amp:
                     scaler_amp.scale(loss).backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # 梯度裁剪
                     scaler_amp.step(optimizer)
                     scaler_amp.update()
                 else:
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # 梯度裁剪
                     optimizer.step()
+
+            if patience_counter >= patience:
+                break
 
             model.eval()
             with torch.no_grad():
-                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
+                with torch.cuda.amp.autocast(enabled=use_amp):
                     val_outputs = model(X_val_tensor.to(self.device))
                     val_loss = criterion(val_outputs, y_val_tensor.to(self.device))
+                
+                if not torch.isfinite(val_loss):
+                    print(f"FATAL: Epoch {epoch}, 验证损失变为 {val_loss.item()}！")
             
-            scheduler.step(val_loss)
+            scheduler.step(val_loss.item())
             
             if val_loss.item() < best_val_loss:
-                best_val_loss = val_loss.item(); patience_counter = 0
+                best_val_loss = val_loss.item()
+                patience_counter = 0
                 best_model_state = copy.deepcopy(model.state_dict())
             else:
                 patience_counter += 1
             
             if self.verbose and (epoch + 1) % self.verbose_period == 0:
-                epoch_iterator.set_description(f"    - Epochs {epoch + 1}")
-                epoch_iterator.set_postfix(total_epochs=epochs, best_val_loss=f"{best_val_loss:.6f}")
+                epoch_iterator.set_postfix(best_val_loss=f"{best_val_loss:.6f}")
 
-            if patience_counter >= patience: break
+            if patience_counter >= patience:
+                if self.verbose: tqdm.write(f"    - INFO: 早停机制已在第 {epoch + 1} 轮触发。")
+                break
         
-        if self.verbose:
-            tqdm.write(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch - patience_counter + 1}")
+        epoch_finished = epoch - patience_counter + 1 if best_val_loss != float('inf') else 0
+        if self.verbose: tqdm.write(f"    - Fold finished. Best validation loss: {best_val_loss:.6f} at epoch {epoch_finished}")
 
-        ic_df, oof_df = pd.DataFrame(), pd.DataFrame()
-        fold_stats = {}
+        ic_df, oof_df, fold_stats = pd.DataFrame(), pd.DataFrame(), {}
         if best_val_loss != float('inf'):
             fold_stats['best_loss'] = f"{best_val_loss:.6f}"
+        
+        metadata = {'input_size': X_train_tensor.shape[2], 'feature_cols': cached_data.get('feature_cols')}
         
         if X_val_tensor.shape[0] > 0 and best_model_state:
             model.load_state_dict(best_model_state)
             model.eval()
             with torch.no_grad():
-                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
+                with torch.cuda.amp.autocast(enabled=use_amp):
                     preds = model(X_val_tensor.to(self.device)).cpu().numpy().flatten()
             
             eval_df = pd.DataFrame({'y_pred': preds, 'y_true': y_val_seq, 'date': pd.to_datetime(dates_val_seq)})
@@ -184,92 +205,12 @@ class LSTMBuilder:
             
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                # ... (IC 计算) ...
+                fold_ic = eval_df['y_pred'].rank().corr(eval_df['y_true'].rank(), method='spearman')
+                if pd.notna(fold_ic):
+                    ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
 
-        del model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, train_loader
+        del model, train_loader, train_dataset
         gc.collect()
         if self.device == 'cuda': torch.cuda.empty_cache()
             
-        return {'model_state_dict': best_model_state}, ic_df, oof_df, fold_stats
-
-    def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
-
-        label_col = self.label_col
-        features = [col for col in full_df.columns if col not in label_col and not col.startswith('future_')]
-        
-        final_scaler = StandardScaler()
-        full_df_scaled = full_df.copy()
-        full_df_scaled.index.name = 'date'
-        full_df_scaled[features] = final_scaler.fit_transform(full_df[features])
-
-        X_full, y_full, _ = self._create_sequences(full_df_scaled, features)
-        if len(X_full) == 0:
-            raise ValueError("无法为最终模型创建任何数据序列，请检查数据长度和 sequence_length 设置。")
-
-        p = self.lstm_params
-        batch_size = p.get('batch_size', 128)
-        num_workers = p.get('num_workers', 0)
-        
-        # 根据 config 决定数据类型
-        precision = p.get('precision', 32)
-        torch_dtype = torch.float16 if precision == 16 else torch.float32
-        
-        train_dataset = TensorDataset(
-            torch.from_numpy(X_full).to(dtype=torch_dtype), 
-            torch.from_numpy(y_full).unsqueeze(1).to(dtype=torch_dtype)
-        )
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True,
-            drop_last=True
-        )
-        
-        model = LSTMModel(
-            input_size=X_full.shape[2],
-            hidden_size_1=p.get('units_1', 64),
-            hidden_size_2=p.get('units_2', 32),
-            dropout=p.get('dropout', 0.2)
-        ).to(self.device)
-        
-        model = model.to(dtype=torch_dtype)
-        
-        criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
-        
-        final_epochs = p.get('final_model_epochs', max(1, int(p.get('epochs', 100) * 0.5)))
-        final_epoch_iterator = tqdm(range(final_epochs), desc="    - 最终模型 Epochs", leave=False, disable=not self.verbose)
-
-        for epoch in final_epoch_iterator:
-            model.train()
-            epoch_loss_sum = 0.0
-            batch_count = 0
-            for X_batch, y_batch in train_loader:
-                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
-                optimizer.zero_grad(set_to_none=True)
-
-                outputs = model(X_batch)
-                loss = criterion(outputs, y_batch)
-                loss.backward()
-                optimizer.step()
-                
-                epoch_loss_sum += loss.item()
-                batch_count += 1
-            
-            avg_loss = epoch_loss_sum / batch_count if batch_count > 0 else 0.0
-            if self.verbose and (epoch + 1) % self.verbose_period == 0:
-                final_epoch_iterator.set_postfix(avg_loss=f"{avg_loss:.6f}")
-
-        if self.verbose:
-            print(f"    - 最终模型训练已在 {final_epochs} 轮后完成。")
-
-        return {
-            'model': model, 
-            'scaler': final_scaler,
-            'metadata': {
-                'input_size': X_full.shape[2],
-                'feature_cols': features 
-            }
-        }
+        return {'model_state_dict': best_model_state, 'metadata': metadata}, ic_df, oof_df, fold_stats

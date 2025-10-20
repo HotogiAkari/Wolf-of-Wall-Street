@@ -3,7 +3,6 @@
 import warnings
 import pandas as pd
 import lightgbm as lgb
-from tqdm.autonotebook import tqdm
 from typing import Any, Dict, Tuple
 from lightgbm.callback import early_stopping
 from sklearn.preprocessing import StandardScaler

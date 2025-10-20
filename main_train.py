@@ -20,6 +20,23 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
     加载配置文件，并将所有必需的模块动态导入到一个字典中。
     """
     print("--- 正在初始化环境：加载配置与模块... ---")
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            temp_config = yaml.safe_load(f)
+        
+        num_cores = temp_config.get('global_settings', {}).get('num_cpu_cores_for_data', '4')
+        
+        os.environ['OMP_NUM_THREADS'] = str(num_cores)
+        os.environ['MKL_NUM_THREADS'] = str(num_cores)
+        os.environ['OPENBLAS_NUM_THREADS'] = str(num_cores)
+        
+        print(f"INFO: 底层并行计算库线程数已设置为: {num_cores}")
+
+    except FileNotFoundError:
+        print(f"WARNNING: 未找到配置文件 '{config_path}'，无法设置并行线程数。将使用默认值。")
+    except Exception as e:
+        print(f"WARNNING: 读取配置文件以设置并行线程数时出错: {e}")
     
     project_root = str(Path(__file__).resolve().parent)
     if project_root not in sys.path:
@@ -33,8 +50,10 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
         from model.builders.model_fuser import ModelFuser
         from model.builders.lgbm_builder import LGBMBuilder
         from model.builders.lstm_builder import LSTMBuilder, LSTMModel
+        from model.builders.tabtransformer_builder import TabTransformerBuilder
         from risk_management.risk_manager import RiskManager
         from backtest.backtester import VectorizedBacktester
+        from backtest.event_driven_backtester import run_backtrader_backtest
         print("INFO: 项目模块导入成功。")
     except ImportError as e:
         print(f"ERROR: 模块导入失败: {e}")
@@ -56,7 +75,9 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
         'ModelFuser': ModelFuser, 
         'LGBMBuilder': LGBMBuilder,
         'LSTMBuilder': LSTMBuilder, 'LSTMModel': LSTMModel, 
+        'TabTransformerBuilder': TabTransformerBuilder,
         'RiskManager': RiskManager, 'VectorizedBacktester': VectorizedBacktester,
+        'run_backtrader_backtest': run_backtrader_backtest,
         'pd': pd, 'torch': torch, 'joblib': joblib, 'tqdm': tqdm, 'StandardScaler': StandardScaler,
         'Path': Path, 'yaml': yaml, 'json': json
     }
@@ -122,15 +143,13 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
     if not global_data_cache:
         print("INFO: L3 缓存不存在、为空或被强制重建。开始执行预处理流程...\n")
         if config and stocks_to_process:
-            lstm_builder_for_preprocessing = LSTMBuilder(config)
             
-            lstm_precision = default_model_params.get('lstm_params', {}).get('precision', 32)
-            torch_dtype = torch.float16 if lstm_precision == 16 else torch.float32
-            print(f"INFO: LSTM 模型数据将被预处理为 {torch_dtype} 类型。")
+            # (核心修改) 始终使用 float32 处理数据，以兼容 AMP
+            torch_dtype = torch.float32 
+            print(f"INFO: 所有 PyTorch 模型数据将被预处理为 {torch_dtype} 类型。")
             
             for stock_info in tqdm(stocks_to_process, desc="正在预处理股票"):
-                ticker = stock_info.get('ticker')
-                keyword = stock_info.get('keyword', ticker)
+                ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
                 if not ticker: continue
 
                 data_path = get_processed_data_path(stock_info, config)
@@ -142,7 +161,7 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 df.index.name = 'date'
                 folds = walk_forward_split(df, strategy_config)
                 if not folds:
-                    print(f"\n警告: 未能为 {keyword} ({ticker}) 生成任何 Folds。跳过预处理。")
+                    print(f"\n警告: 未能为 {keyword} ({ticker}) 生成任何 Folds。跳过预-处理。")
                     continue
 
                 preprocessed_folds_lgbm, preprocessed_folds_lstm = [], []
@@ -150,47 +169,64 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 features_for_model = [c for c in df.columns if c != label_col and not c.startswith('future_')]
 
                 for train_df, val_df in folds:
-                    # LGBM 数据准备
-                    X_train_model, y_train = train_df[features_for_model], train_df[label_col]
-                    X_val_model, y_val = val_df[features_for_model], val_df[label_col]
-                    scaler_lgbm = StandardScaler()
-                    X_train_scaled = pd.DataFrame(scaler_lgbm.fit_transform(X_train_model), index=X_train_model.index, columns=features_for_model)
-                    X_val_scaled = pd.DataFrame(scaler_lgbm.transform(X_val_model), index=X_val_model.index, columns=features_for_model)
-                    preprocessed_folds_lgbm.append({'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val})
+                    # --- (核心修复) 使用手动、稳健的标准化 ---
+                    train_mean = train_df[features_for_model].mean()
+                    train_std = train_df[features_for_model].std() + 1e-8 # 关键保护
+
+                    X_train_scaled = (train_df[features_for_model] - train_mean) / train_std
+                    X_val_scaled = (val_df[features_for_model] - train_mean) / train_std
+
+                    y_train = train_df[label_col]
+                    y_val = val_df[label_col]
+                    
+                    # LGBM 和 TabTransformer 的数据准备
+                    preprocessed_folds_lgbm.append({
+                        'X_train_scaled': X_train_scaled, 'y_train': y_train, 
+                        'X_val_scaled': X_val_scaled, 'y_val': y_val,
+                        'feature_cols': features_for_model # 传递特征列表以备后用
+                    })
 
                     # LSTM 数据准备
                     use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
                     if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
-                        lstm_seq_len = lstm_builder_for_preprocessing.sequence_length
-                        if len(train_df) < lstm_seq_len: continue
-                        train_history_for_val = train_df.iloc[-lstm_seq_len:]
-                        combined_df_for_lstm_val = pd.concat([train_history_for_val, val_df])
+                        lstm_seq_len = default_model_params.get('lstm_params', {}).get('sequence_length', 60)
                         
-                        scaler_lstm = StandardScaler()
-                        train_df_scaled = train_df.copy()
-                        combined_df_for_lstm_val_scaled = combined_df_for_lstm_val.copy()
-                        train_df_scaled[features_for_model] = scaler_lstm.fit_transform(train_df[features_for_model])
-                        combined_df_for_lstm_val_scaled[features_for_model] = scaler_lstm.transform(combined_df_for_lstm_val[features_for_model])
+                        if len(train_df) < lstm_seq_len: continue
 
-                        X_train_seq, y_train_seq, _ = lstm_builder_for_preprocessing._create_sequences(train_df_scaled, features_for_model)
-                        X_val_seq, y_val_seq, dates_val_seq = lstm_builder_for_preprocessing._create_sequences(combined_df_for_lstm_val_scaled, features_for_model)
+                        # 注意：LSTM 序列化需要使用已经标准化后的数据
+                        train_df_scaled_for_lstm = X_train_scaled.copy()
+                        train_df_scaled_for_lstm[label_col] = y_train
+                        
+                        val_df_scaled_for_lstm = X_val_scaled.copy()
+                        val_df_scaled_for_lstm[label_col] = y_val
+
+                        train_history_for_val = train_df_scaled_for_lstm.iloc[-lstm_seq_len:]
+                        combined_df_for_lstm_val = pd.concat([train_history_for_val, val_df_scaled_for_lstm])
+                        
+                        # 实例化一次 builder 以便调用 _create_sequences
+                        lstm_builder_for_seq = LSTMBuilder(config)
+                        X_train_seq, y_train_seq, _ = lstm_builder_for_seq._create_sequences(train_df_scaled_for_lstm.reset_index(), features_for_model)
+                        X_val_seq, y_val_seq, dates_val_seq = lstm_builder_for_seq._create_sequences(combined_df_for_lstm_val.reset_index(), features_for_model)
 
                         preprocessed_folds_lstm.append({
                             'X_train_tensor': torch.from_numpy(X_train_seq).to(dtype=torch_dtype),
                             'y_train_tensor': torch.from_numpy(y_train_seq).unsqueeze(1).to(dtype=torch_dtype),
                             'X_val_tensor': torch.from_numpy(X_val_seq).to(dtype=torch_dtype),
                             'y_val_tensor': torch.from_numpy(y_val_seq).unsqueeze(1).to(dtype=torch_dtype),
-                            'y_val_seq': y_val_seq, 'dates_val_seq': dates_val_seq
+                            'y_val_seq': y_val_seq, 'dates_val_seq': dates_val_seq,
+                            'feature_cols': features_for_model
                         })
                 
                 global_data_cache[ticker] = {'full_df': df, 'lgbm_folds': preprocessed_folds_lgbm, 'lstm_folds': preprocessed_folds_lstm}
             
-            print(f"\nINFO: 预处理完成。正在保存 L3 缓存至 {L3_CACHE_PATH}...")
-            try:
-                joblib.dump(global_data_cache, L3_CACHE_PATH)
-                print("SUCCESS: L3 缓存已保存。")
-            except Exception as e:
-                print(f"ERROR: 保存 L3 缓存失败: {e}")
+            if not global_data_cache:
+                print("WARNNING: 预处理后未能生成任何有效的缓存数据。")
+            else:
+                try:
+                    joblib.dump(global_data_cache, L3_CACHE_PATH)
+                    print(f"\nSUCCESS: L3 缓存已成功保存至 {L3_CACHE_PATH}")
+                except Exception as e:
+                    print(f"ERROR: 保存 L3 缓存失败: {e}")
 
     print("--- 阶段 2.1 成功完成。 ---")
     return global_data_cache
@@ -331,29 +367,27 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
 
     print("--- 阶段 2.2 成功完成。 ---")
 
-def run_all_models_train(config: dict, modules: dict, global_data_cache: dict, force_retrain_base=False, force_retrain_fuser=False):
+def run_all_models_train(config: dict, modules: dict, global_data_cache: dict, 
+                     force_retrain_base=False, 
+                     force_retrain_fuser=False, 
+                     run_fusion=True) -> list:
     """
-    执行基础模型和融合模型的训练 (对应 Train.ipynb 阶段 2.3 & 2.3.5)。
+    执行基础模型和融合模型的训练。
     """
-    print("=== 阶段 2.3：模型训练 ===")
+    print("=== 工作流阶段 2.3：训练所有模型 ===")
 
     # 提取所需模块和配置
-    tqdm = modules['tqdm']
-    run_training_for_ticker = modules['run_training_for_ticker']
-    ModelFuser = modules['ModelFuser']
-    
-    global_settings = config.get('global_settings', {})
-    strategy_config = config.get('strategy_config', {})
-    default_model_params = config.get('default_model_params', {})
-    stocks_to_process = config.get('stocks_to_process', [])
+    tqdm, run_training_for_ticker, ModelFuser = modules['tqdm'], modules['run_training_for_ticker'], modules['ModelFuser']
+    global_settings, strategy_config, default_model_params, stocks_to_process = config.get('global_settings', {}), config.get('strategy_config', {}), config.get('default_model_params', {}), config.get('stocks_to_process', [])
 
-    # --- 2.3 基础模型训练 ---
+    # --- 2.3.1 基础模型训练 ---
     print("\n--- 2.3.1 基础模型训练 ---")
     all_ic_history = []
     if not (config and stocks_to_process and global_data_cache):
         print("ERROR: 配置或数据缓存为空，无法训练基础模型。")
-        return []
+        return all_ic_history
 
+    # 从配置中读取要训练的模型列表
     models_to_train = global_settings.get('models_to_train', ['lgbm', 'lstm'])
     stock_iterator = tqdm(stocks_to_process, desc="训练基础模型")
 
@@ -369,12 +403,24 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict, f
         full_df = cached_stock_data['full_df']
         
         for model_type in models_to_train:
-            use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
-            if model_type == 'lstm' and not use_lstm:
-                print(f"\nINFO: {keyword} ({ticker}) 已配置为不使用 LSTM, 跳过训练。")
+            # 检查该模型是否被全局或个股配置启用
+            use_model_flag_name = f"use_{model_type}_globally"
+            use_model_per_stock_flag_name = f"use_{model_type}"
+            
+            # 默认启用 lgbm (因为它没有开关)
+            is_enabled = True
+            if model_type != 'lgbm':
+                 is_enabled = stock_info.get(use_model_per_stock_flag_name, global_settings.get(use_model_flag_name, True))
+
+            if not is_enabled:
+                print(f"\nINFO: {keyword} ({ticker}) 已配置为不使用 {model_type.upper()}, 跳过训练。")
                 continue
 
             folds_key = f"{model_type}_folds"
+            # TabTransformer 复用 LGBM 的 folds 数据
+            if model_type == 'tabtransformer' and folds_key not in cached_stock_data:
+                folds_key = 'lgbm_folds'
+
             preprocessed_folds = cached_stock_data.get(folds_key)
             if not preprocessed_folds:
                 print(f"\nWARNNING: 未找到 {keyword} ({ticker}) 的 '{model_type}' 预处理 folds。跳过训练。")
@@ -388,75 +434,82 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict, f
 
             ic_history = run_training_for_ticker(
                 preprocessed_folds=preprocessed_folds,
-                ticker=ticker,
-                model_type=model_type,
-                config=run_config, 
-                force_retrain=force_retrain_base,
-                keyword=keyword
+                ticker=ticker, model_type=model_type, config=run_config, 
+                force_retrain=force_retrain_base, keyword=keyword
             )
             
             if ic_history is not None and not ic_history.empty:
-                # 添加辅助列，以便后续评估
                 ic_history['ticker'] = ticker
                 ic_history['model_type'] = model_type
                 all_ic_history.append(ic_history)
 
     # --- 2.3.5 融合模型训练 ---
-    print("\n--- 2.3.5 融合模型训练 ---")
-    if config and stocks_to_process:
-        fuser_iterator = tqdm(stocks_to_process, desc="训练融合模型")
-        for stock_info in fuser_iterator:
-            ticker = stock_info.get('ticker')
-            keyword = stock_info.get('keyword', ticker)
-            fuser_iterator.set_description(f"训练融合模型 for {keyword} ({ticker})")
-            if not ticker: continue
+    if run_fusion:
+        print("\n--- 2.3.5 融合模型训练 ---")
+        if config and stocks_to_process:
+            if not force_retrain_base and not all_ic_history:
+                 print("INFO: 基础模型被跳过且无历史 IC 数据，因此跳过融合模型训练。")
+            else:
+                fuser_iterator = tqdm(stocks_to_process, desc="训练融合模型")
+                for stock_info in fuser_iterator:
+                    ticker = stock_info.get('ticker')
+                    keyword = stock_info.get('keyword', ticker)
+                    fuser_iterator.set_description(f"训练融合模型 for {keyword} ({ticker})")
+                    if not ticker: continue
 
-            run_config = {
-                'global_settings': global_settings, 
-                'strategy_config': strategy_config,
-                'default_model_params': default_model_params,
-                'stocks_to_process': [stock_info]
-            }
-            fuser = ModelFuser(ticker, run_config)
-            
-            if not force_retrain_fuser and fuser.meta_path.exists():
-                print(f"INFO: {keyword} ({ticker}) 的融合模型元数据已存在。跳过训练。")
-                continue
+                    fuser = ModelFuser(ticker, config)
+                    
+                    if not force_retrain_fuser and fuser.meta_path.exists():
+                        print(f"INFO: {keyword} ({ticker}) 的融合模型元数据已存在。跳过训练。")
+                        continue
 
-            fuser.train()
+                    fuser.train()
+    else:
+        print("\n--- 2.3.5 融合模型训练 (已跳过) ---")
 
     print("--- 阶段 2.3 成功完成。 ---")
     return all_ic_history
 
 def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list) -> tuple:
     """
-    (新增) 执行结果聚合与评估，计算 ICIR 和回测指标，但不进行可视化。
+    执行结果聚合与评估，计算 ICIR 和两种回测（向量化与事件驱动）的指标，但不进行可视化。
     返回包含评估结果的 DataFrames。
     """
-    print("\n" + "="*80)
     print("=== 工作流阶段 2.4a：计算性能评估指标 ===")
-    print("="*80)
 
-    pd, Path, np, ModelFuser, tqdm, VectorizedBacktester = modules['pd'], modules['Path'], modules['np'], modules['ModelFuser'], modules['tqdm'], modules['VectorizedBacktester']
-    global_settings, stocks_to_process = config.get('global_settings', {}), config.get('stocks_to_process', [])
+    # --- 1. 提取模块和配置 ---
+    pd = modules.get('pd')
+    Path = modules.get('Path')
+    np = modules.get('np')
+    json = modules.get('json')
+    ModelFuser = modules.get('ModelFuser')
+    tqdm = modules.get('tqdm')
+    VectorizedBacktester = modules.get('VectorizedBacktester')
+    run_backtrader_backtest = modules.get('run_backtrader_backtest') # <-- 核心修复点
+
+    global_settings = config.get('global_settings', {})
+    stocks_to_process = config.get('stocks_to_process', [])
 
     if not all_ic_history:
         print("\nWARNNING: 训练期间未生成任何基础模型的 IC 历史。无法进行评估。")
         return None, None, None
 
-    # --- ICIR 计算 ---
+    # --- 1. 汇总 ICIR 性能 ---
     full_ic_df = pd.concat(all_ic_history).drop_duplicates(subset=['ticker', 'model_type', 'date'], keep='last')
     
     fused_oof_preds_list = []
+    print("INFO: 正在加载融合模型 (ModelFuser) 并对 OOF 数据进行批量预测...")
     for stock_info in tqdm(stocks_to_process, desc="融合 OOF 预测 (评估)"):
         ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
         if not ticker: continue
         try:
             fuser = ModelFuser(ticker, config)
             if not fuser.load(): continue
+            
             oof_dfs = []
             model_dir = Path(global_settings.get('model_dir', 'models')) / ticker
             models_trained = global_settings.get('models_to_train', [])
+            
             y_true_df_loaded = False
             for model_type in models_trained:
                 oof_path = model_dir / f"{model_type}_oof_preds.csv"
@@ -466,9 +519,11 @@ def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list
                         oof_dfs.append(df.set_index('date')[['y_true']])
                         y_true_df_loaded = True
                     oof_dfs.append(df.set_index('date')[['y_pred']].rename(columns={'y_pred': f'pred_{model_type}'}))
-            if len(oof_dfs) < (len(models_trained) + 1): continue
+            
+            if len(oof_dfs) < 2: continue
             all_oof_df = pd.concat(oof_dfs, axis=1).dropna()
             if all_oof_df.empty: continue
+            
             fused_preds_series = fuser.predict_batch(all_oof_df)
             fused_oof_df = pd.DataFrame({'y_pred': fused_preds_series, 'y_true': all_oof_df['y_true'], 'ticker': ticker})
             fused_oof_preds_list.append(fused_oof_df)
@@ -500,27 +555,73 @@ def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list
     def safe_std(x): return x.std(ddof=0) if len(x) > 1 else 0.0
     evaluation_summary = final_eval_df.groupby(['ticker_name', 'model_type'])['rank_ic'].agg(mean='mean', std=safe_std).reset_index()
     evaluation_summary['icir'] = np.where(evaluation_summary['std'] > 1e-8, evaluation_summary['mean'] / evaluation_summary['std'], evaluation_summary['mean'] * 100)
-    print("\n--- 最终模型预测能力评估 (ICIR) ---\n", evaluation_summary.to_string())
+    
+    print("\n" + "="*80)
+    print("### 1. 模型预测能力评估 (ICIR) ###")
+    print("="*80)
+    print(evaluation_summary.to_string())
 
-    # --- 回测指标计算 ---
-    all_backtest_results = []
+    # --- 2. 向量化回测 ---
+    all_vectorized_results = []
     if fused_oof_preds_list and VectorizedBacktester:
-        print("\n--- 最终策略业绩回测 ---")
+        print("\n" + "="*80)
+        print("### 2. 策略理论表现评估 (向量化回测) ###")
+        print("="*80)
         full_fused_oof_df = pd.concat(fused_oof_preds_list)
         for ticker, stock_oof_df in full_fused_oof_df.groupby('ticker'):
             try:
                 backtester = VectorizedBacktester(stock_oof_df, config)
                 backtester.run()
-                all_backtest_results.append(backtester.get_results())
+                all_vectorized_results.append(backtester.get_results())
             except Exception as e:
-                print(f"ERROR: 为 {ticker} 执行回测时失败: {e}")
+                print(f"ERROR: 为 {ticker} 执行向量化回测时失败: {e}")
     
-    backtest_summary = pd.DataFrame(all_backtest_results).set_index('Ticker') if all_backtest_results else pd.DataFrame()
-    if not backtest_summary.empty:
-        print("\n--- 所有股票策略业绩汇总 ---\n", backtest_summary.to_string())
+    vectorized_summary = pd.DataFrame(all_vectorized_results).set_index('Ticker') if all_vectorized_results else pd.DataFrame()
+    if not vectorized_summary.empty:
+        print(vectorized_summary.to_string())
 
-    print("--- 阶段 2.4 成功完成。 ---")
-    return evaluation_summary, backtest_summary, final_eval_df
+    # --- 7. 事件驱动回测 ---
+    if run_backtrader_backtest and fused_oof_preds_list:
+        print("--- 3. 策略实盘模拟评估 (事件驱动回测) ---")
+        get_processed_data_path = modules.get('get_processed_data_path')
+        full_fused_oof_df = pd.concat(fused_oof_preds_list)
+
+        for ticker, stock_oof_df in full_fused_oof_df.groupby('ticker'):
+            keyword = final_eval_df[final_eval_df['ticker'] == ticker]['ticker_name'].iloc[0]
+            print(f"\n--- 正在为 {keyword} ({ticker}) 执行事件驱动回测... ---")
+            
+            try:
+                stock_info = next((s for s in stocks_to_process if s['ticker'] == ticker), None)
+                if not stock_info: continue
+                
+                l2_path = get_processed_data_path(stock_info, config)
+                if not l2_path.exists(): continue
+                meta_path = l2_path.parent / 'meta.json'
+                
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                
+                # 构建 L1 缓存的路径
+                # 注意：此处的 'raw_{ticker}_{start}_{end}.pkl' 格式需要与 get_data.py 中的 _get_ohlcv_data_bs 函数的缓存文件名格式严格一致
+                ticker_bs_format = stock_info.get('ticker', '').replace('.', '_')
+                raw_data_path = Path(config['global_settings']['data_cache_dir']) / 'raw_ohlcv' / f"raw_{ticker_bs_format}_{meta['data_start_date']}_{meta['data_end_date']}.pkl"
+                
+                if not raw_data_path.exists():
+                    print(f"WARNNING: 找不到 {keyword} ({ticker}) 的 L1 原始日线数据缓存，路径: {raw_data_path}。跳过事件驱动回测。")
+                    continue
+                
+                daily_ohlcv = pd.read_pickle(raw_data_path)
+                
+                # 运行回测
+                run_backtrader_backtest(daily_ohlcv, stock_oof_df, config, plot=False)
+
+            except Exception as e:
+                print(f"  - ERROR: 为 {keyword} ({ticker}) 执行事件驱动回测时失败: {e}")
+
+    print("\n--- 评估阶段成功完成。 ---")
+    
+    # 将所有结果返回给主工作流
+    return evaluation_summary, vectorized_summary, final_eval_df
 
 def run_results_visualization(config: dict, modules: dict, evaluation_summary: pd.DataFrame, backtest_summary: pd.DataFrame, final_eval_df: pd.DataFrame):
     """
@@ -769,7 +870,6 @@ def run_single_stock_prediction(config: dict, modules: dict, target_ticker: str 
     print(f"\n### 单点预测工作流已成功为 {keyword} ({target_ticker}) 执行完毕！ ###")
 
 
-
 # --- 主执行函数 ---
 
 # --- 1. 训练工作流 ---
@@ -780,7 +880,7 @@ def run_complete_training_workflow(
     run_hpo=False, 
     force_retrain_base=False, 
     force_retrain_fuser=False,
-    show_evaluate=True,
+    run_fusion=True,
     run_evaluation=True,
     run_visualization=True
 ):
@@ -790,23 +890,36 @@ def run_complete_training_workflow(
     """
     (主函数1) 按顺序执行完整的、非交互式的训练工作流。
     """
-    print("\n" + "#"*80 + "\n### 主工作流：启动完整模型训练 ###\n" + "#"*80)
+    print("### 主工作流：启动完整模型训练 ###")
     try:
         run_all_data_pipeline(config, modules)
+        
         global_data_cache = run_preprocess_l3_cache(config, modules, force_reprocess=force_reprocess_l3)
         if not global_data_cache:
-            print("ERROR: L3 数据缓存为空，无法继续。工作流终止。"); return
+            print("ERROR: L3 数据缓存为空，无法继续。工作流终止。")
+            return
+
         if run_hpo:
             run_hpo_train(config, modules, global_data_cache)
-        all_ic_history = run_all_models_train(config, modules, global_data_cache, force_retrain_base=force_retrain_base, force_retrain_fuser=force_retrain_fuser)
+        
+        all_ic_history = run_all_models_train(
+            config, modules, global_data_cache, 
+            force_retrain_base=force_retrain_base, 
+            force_retrain_fuser=force_retrain_fuser,
+            run_fusion=run_fusion
+        )
+        
         if run_evaluation and all_ic_history:
             evaluation_summary, backtest_summary, final_eval_df = run_performance_evaluation(config, modules, all_ic_history)
-            if run_visualization:
+            
+            if run_visualization and (evaluation_summary is not None or backtest_summary is not None):
                 run_results_visualization(config, modules, evaluation_summary, backtest_summary, final_eval_df)
+                
         print("\n### 完整训练工作流已成功执行完毕！ ###")
     except Exception as e:
         print(f"\nFATAL: 训练工作流在执行过程中发生严重错误: {e}")
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
 
 # --- 2. 批量预测 ---
 def run_batch_prediction_workflow(config: dict, modules: dict):
@@ -872,84 +985,55 @@ if __name__ == '__main__':
     import argparse
     import sys
 
-    # --- 1. 设置命令行参数解析器 ---
     parser = argparse.ArgumentParser(
         description="【量化模型核心引擎】一个集成了训练、预测和自动化更新功能的多功能工具。",
-        formatter_class=argparse.RawTextHelpFormatter # 保持帮助信息中的换行格式
+        formatter_class=argparse.RawTextHelpFormatter
     )
     
-    # 定义主命令
-    parser.add_argument(
-        'workflow', 
-        choices=['train', 'predict', 'retrain', 'batch_predict'], 
-        help=(
-            "要执行的工作流:\n"
-            "  train          - (研究) 执行一次完整的训练与评估流程，可用于手动模型构建。\n"
-            "  predict        - (应用) 为单个目标股票生成即时交易决策。\n"
-            "  retrain        - (运维) 执行一次周期性的、自动化的模型再训练。\n"
-            "  batch_predict  - (应用) 为配置文件中的所有股票批量生成交易决策。"
-        )
-    )
+    parser.add_argument('workflow', choices=['train', 'predict', 'retrain', 'batch_predict'], help="要执行的工作流")
+    parser.add_argument('--ticker', type=str, help="（仅用于 'predict'）目标股票代码")
+    parser.add_argument('--config', type=str, default='configs/config.yaml', help="指定配置文件路径")
+    parser.add_argument('--models', nargs='+', help="（仅用于 'predict'）指定只使用哪些模型")
+    parser.add_argument('--no-viz', action='store_true', help="（仅用于 'train'）执行训练，但不生成可视化图表")
+    parser.add_argument('--no-fusion', action='store_true', help="（仅用于 'train'）执行基础模型训练，但不训练融合模型")
     
-    # 定义可选参数
-    parser.add_argument(
-        '--ticker', 
-        type=str, 
-        help="（仅用于 'predict' 工作流）要预测的目标股票代码，例如 '600519.SH'。\n"
-             "如果未提供，将使用配置文件中的默认值。"
-    )
-    parser.add_argument(
-        '--config',
-        type=str,
-        default='configs/config.yaml',
-        help="指定配置文件的路径 (默认为 'configs/config.yaml')。"
-    )
-
     args = parser.parse_args()
 
-    # --- 2. 在所有操作之前，首先加载环境 ---
     print("--- 启动量化模型核心引擎 ---")
     config, modules = run_load_config_and_modules(config_path=args.config)
     
     if not (config and modules):
-        print("FATAL: 环境初始化失败，无法执行任何工作流。请检查配置文件路径和模块导入。")
-        sys.exit(1) # 以错误码退出
+        print("FATAL: 环境初始化失败，无法执行任何工作流。")
+        sys.exit(1)
 
-    # --- 3. 根据命令行参数分发并执行工作流 ---
     try:
         if args.workflow == 'train':
-            # 手动执行的完整训练，通常会运行 HPO 并使用已有的缓存
             run_complete_training_workflow(
-                config=config, 
-                modules=modules,
-                run_hpo=True,                   # 手动研究时，通常希望运行 HPO
-                force_reprocess_l3=False,       # 使用现有 L3 缓存以加速
-                force_retrain_base=False,       # 使用现有模型以加速
-                force_retrain_fuser=False,      # 使用现有融合模型以加速
-                run_evaluation=True             # 显示最终的评估图表
+                config=config, modules=modules,
+                run_hpo=True,
+                force_reprocess_l3=False,
+                force_retrain_base=False,
+                force_retrain_fuser=False,
+                run_fusion=not args.no_fusion,
+                run_evaluation=True,
+                run_visualization=not args.no_viz
             )
         
         elif args.workflow == 'predict':
-            # 确定要预测的 Ticker
-            ticker_to_predict = args.ticker if args.ticker else config.get('application_settings', {}).get('prophet_target_ticker')
-            
+            ticker_to_predict = args.ticker or config.get('application_settings', {}).get('prophet_target_ticker')
             if ticker_to_predict:
-                print(f"INFO: 将为股票 {ticker_to_predict} 执行单点预测...")
-                run_single_stock_prediction(config, modules, target_ticker=ticker_to_predict)
+                run_single_stock_prediction(config, modules, target_ticker=ticker_to_predict, use_specific_models=args.models)
             else:
-                print("ERROR: 未在命令行或配置文件 (application_settings.prophet_target_ticker) 中指定要预测的股票。")
-                print("用法示例: python main_train.py predict --ticker 600519.SH")
+                print("ERROR: 未指定要预测的股票。")
 
         elif args.workflow == 'retrain':
-            # 自动化的周期性重训，通常是强制性的，且不进行 HPO 和可视化
             run_periodic_retraining_workflow(config, modules)
         
         elif args.workflow == 'batch_predict':
-            # 批量为股票池中的所有股票执行预测
             run_batch_prediction_workflow(config, modules)
 
     except Exception as e:
-        print(f"\nFATAL: 在执行工作流 '{args.workflow}' 期间发生未捕获的顶级异常: {e}")
+        print(f"\nFATAL: 在执行工作流 '{args.workflow}' 期间发生顶级异常: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

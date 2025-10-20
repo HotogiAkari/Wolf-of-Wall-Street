@@ -8,13 +8,13 @@ from pathlib import Path
 from tqdm.autonotebook import tqdm
 
 try:
-    from model_builders.lgbm_builder import LGBMBuilder
-    from model_builders.lstm_builder import LSTMBuilder
+    from model.builders.lgbm_builder import LGBMBuilder
+    from model.builders.lstm_builder import LSTMBuilder
 except ImportError:
     project_root = str(Path(__file__).resolve().parents[1])
     if project_root not in sys.path: sys.path.append(project_root)
-    from model_builders.lgbm_builder import LGBMBuilder
-    from model_builders.lstm_builder import LSTMBuilder
+    from model.builders.lgbm_builder import LGBMBuilder
+    from model.builders.lstm_builder import LSTMBuilder
 
 # 定义“无限制”搜索时，各类参数的回退默认范围
 DEFAULT_SEARCH_RANGES = {

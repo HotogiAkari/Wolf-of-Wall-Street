@@ -6,6 +6,7 @@
 global_settings:
   seed: 64                            # 全局随机种子. 用于保证所有涉及随机性的操作（如模型训练, 数据采样）的结果都可以被复现. 
   device: 'gpu'                       # 默认计算设备. 'gpu' 会优先使用 CUDA，如果不可用则自动切换到 'cpu'. 'cpu' 则强制使用 CPU. 
+  num_cpu_cores_for_data: '4'         # 用于控制 NumPy/SciPy/Scikit-learn 底层计算库（如 MKL, OpenBLAS）使用的线程数
   model_dir: 'data/models'            # 存放所有已训练模型, scaler 和 IC 历史记录的主目录.
   hpo_log_dir: 'data/hpo_logs'             # HPO 结果日志的存放目录.
   data_cache_dir: 'data/data_cache'   # 用于缓存从 API 下载的原始数据的目录，避免重复下载，加快后续运行速度. 
@@ -15,11 +16,12 @@ global_settings:
   order_history_db: 'order_history.db' # 交易历史 SQLite 数据库的文件名，由 risk_manager 使用. 
   num_model_versions_to_keep: 3       # 模型版本控制. 对于每只股票的每个模型，只保留最近的 N 个版本，旧版本会被自动清理. 
   use_lstm_globally: True             # 是否为股票训练LSTM模型(每只股票可以单独定义)
+  use_tabtransformer_globally: True   # 是否为股票训练TabTransformer模型(每只股票可以单独定义)
 
   tushare_api_token: 'TUSHARE_TOKEN' # 请在这里填入Tushare Token
   
   # 定义本次运行要训练的模型类型列表. 可以只写 ['lgbm'] 或 ['lstm'] 来单独训练某个模型. 
-  models_to_train: ['lgbm', 'lstm'] 
+  models_to_train: ['lgbm', 'lstm', 'tabtransformer'] 
   
   # 定义 LGBM 分位数回归模型要预测的分位数. 0.5 代表中位数，是核心的点预测. 
   quantiles: [0.05, 0.5, 0.95]
@@ -167,6 +169,10 @@ backtest_settings:
   # 每次换仓（从多到空，从空到多，从有仓位到空仓）时，扣除的交易成本（双边）。
   transaction_cost: 0.001   # 0.1%
 
+  # 用于事件驱动回测的参数
+  initial_cash: 500.0  # 初始资金
+  commission_pct: 0.0005  # 单边佣金率 (0.05%)
+
 # --- 3. HPO (超参数优化) 设定 ---
 hpo_config:
   # 全局 HPO 设置 (作为回退的默认值)
@@ -256,6 +262,24 @@ default_model_params:
     dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合. 
     early_stopping_rounds_lstm: 20 # LSTM 的早停法耐心轮次. 
     precision: 16               # 控制 LSTM 的训练精度(float16 或 float32). 从32修改为16需重新运行数据预处理.
+
+  tabtransformer_params:
+    categorical_features: ['day_of_week', 'month', 'regime_is_uptrend', 'regime_is_high_vol']   # 定义哪些特征是类别特征 (必须是整数编码)
+    
+    # 训练参数
+    verbose_period: 10          # 表示主训练时，每 n 轮打印一次验证集损失
+    epochs: 100                 # 最大的训练轮次. 通常由早停法提前终止.
+    final_model_epochs: 50      # 最终模型训练的固定轮次
+    batch_size: 256             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
+    learning_rate: 0.005        # 优化器（如 Adam）的学习率. 
+    early_stopping_rounds: 20   # 早停法耐心轮次.
+    
+    # 模型结构参数
+    dim: 32       # Embedding 和 Transformer 的内部维度
+    depth: 4      # Transformer 层的数量
+    heads: 4      # 多头注意力的头的数量
+    dropout: 0.1  # Dropout 比例
+
 
   fuser_params:
     type: 'elastic_net'             # 元模型类型: 'elastic_net' (推荐), 'ridge' (线性，稳健) 或 'mlp' (非线性，更复杂). 
