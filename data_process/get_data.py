@@ -161,7 +161,7 @@ def _generate_market_breadth_data(start_date: str, end_date: str, cache_dir: Pat
 # 核心初始化与数据获取函数
 def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: Path, keyword: str = None) -> Optional[pd.DataFrame]:
     """
-    (已简化) 从 Baostock 获取日线行情数据，只依赖直接的路径参数。
+    从 Baostock 获取日线行情数据，只依赖直接的路径参数。
     """
     display_name = keyword if keyword else ticker
     raw_cache_dir = cache_dir / "raw_ohlcv"
@@ -169,22 +169,22 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: P
     cache_file_path = raw_cache_dir / f"raw_{ticker}_{start_date}_{end_date}.pkl"
 
     if cache_file_path.exists():
-        print(f"  - 正在从本地缓存加载 {display_name} 的原始日线数据...")
+        print(f"  - 正在从本地缓存加载 {display_name} ({ticker}) 的原始日线数据...")
         return pd.read_pickle(cache_file_path)
 
-    print(f"  - 正在从 Baostock 下载 {display_name} 的日线行情...")
+    print(f"  - 正在从 Baostock 下载 {display_name} ({ticker}) 的日线行情...")
     start_fmt, end_fmt = pd.to_datetime(start_date).strftime('%Y-%m-%d'), pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
     api_call = lambda: bs.query_history_k_data_plus(ticker, "date,open,high,low,close,volume", start_date=start_fmt, end_date=end_date, frequency="d", adjustflag="2")
     rs = _download_with_retry(api_call)
     
     if rs.error_code != '0':
-        print(f"  - WARNING [BS]: 获取 {display_name} 数据失败: {rs.error_msg}")
+        print(f"  - WARNING [BS]: 获取 {display_name} ({ticker}) 数据失败: {rs.error_msg}")
         return None
         
     df = rs.get_data()
     if df.empty:
-        print(f"  - WARNING [BS]: 未能获取到 {display_name} 在指定日期范围的数据。")
+        print(f"  - WARNING [BS]: 未能获取到 {display_name} ({ticker}) 在指定日期范围的数据。")
         return None
         
     df['date'] = pd.to_datetime(df['date'])
@@ -198,71 +198,86 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: P
     
     try:
         df.to_pickle(cache_file_path)
-        print(f"  - INFO: 已将 {display_name} 的数据缓存至 {cache_file_path}")
+        print(f"  - INFO: 已将 {display_name} ({ticker}) 的数据缓存至 {cache_file_path}")
     except Exception as e:
-        print(f"  - WARNING: 无法缓存 {display_name} 的数据: {e}")
+        print(f"  - WARNING: 无法缓存 {display_name} ({ticker}) 的数据: {e}")
         
     return df[['open', 'high', 'low', 'close', 'volume']]
 
 def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_dir: Path, display_name: str = None) -> Optional[pd.DataFrame]:
     """
-    (更新) 优先从 Baostock 获取指数数据。
+    优先从 Baostock 获取指数数据。
+    如果失败，则根据映射表动态调用正确的成分股查询接口，在本地合成指数。
     """
-    # 如果没有提供显示名称，就使用代码本身
-    name_to_show = display_name if display_name else index_code
+    name_to_show = display_name if display_name else "未知指数"
     print(f"  - INFO: 正在为 '{name_to_show}' ({index_code}) 获取指数数据...")
     
-    # 将显示名称传递给下一层函数
     index_df = _get_ohlcv_data_bs(index_code, start_date, end_date, cache_dir, keyword=name_to_show)
     if index_df is not None and not index_df.empty:
-        print(f"    - SUCCESS: 已直接从 Baostock 获取到 '{name_to_show}' 的数据。") # <--- 修改点
+        print(f"    - SUCCESS: 已直接从 Baostock 获取到 '{name_to_show}' ({index_code}) 的数据。")
         return index_df
 
-    # 如果直接获取失败，则尝试在本地合成
-    print(f"    - WARNNING: 无法直接获取指数 {index_code}。将尝试在本地合成等权重指数...")
+    print(f"    - 警告: 无法直接获取指数 '{name_to_show}' ({index_code})。将尝试在本地合成等权重指数...")
     try:
-        # 1. 获取指数成分股
-        rs = bs.query_hs300_stocks() # 示例：获取沪深300成分股，可扩展
-        if rs.error_code != '0':
-            print(f"    - ERROR: 无法获取指数 {index_code} 的成分股: {rs.error_msg}")
+        constituent_api_map_str = {
+            "sh.000300": "query_hs300_stocks",
+            "sz.399300": "query_hs300_stocks",
+            "sh.000905": "query_zz500_stocks",
+            "sz.399905": "query_zz500_stocks",
+            "sh.000016": "query_sz50_stocks",
+            "sz.399006": "query_cyb_stocks",
+        }
+
+        api_func_name = constituent_api_map_str.get(index_code)
+        if api_func_name is None:
+            print(f"    - 错误: 在 API 映射表中未找到指数 '{name_to_show}' ({index_code}) 的成分股查询接口。")
             return None
+        
+        print(f"    - 信息: 正在准备使用 '{api_func_name}' 接口查询成分股...")
+        if not hasattr(bs, api_func_name):
+            print(f"    - 严重错误: Baostock 模块在登录后依然没有 '{api_func_name}' ({index_code}) 方法。请检查库的完整性。")
+            return None
+        
+        api_func = getattr(bs, api_func_name)
+
+        rs = api_func()
         
         constituents = rs.get_data()['code'].tolist()
-        print(f"    - INFO: 成功获取 {len(constituents)} 只成分股。开始下载成分股数据...")
-
-        # 2. 批量获取成分股的收盘价
-        all_closes = []
-        for stock_code in tqdm(constituents, desc=f"下载 {index_code} 成分股", leave=False):
-            stock_df = _get_ohlcv_data_bs(stock_code, start_date, end_date, cache_dir, keyword=stock_code)
-            if stock_df is not None:
-                all_closes.append(stock_df['close'].rename(stock_code))
-        
-        if not all_closes:
-            print("    - ERROR: 未能获取到任何成分股的数据。")
+        if not constituents:
+            print(f"    - 错误: 未能获取到指数 '{name_to_show}' ({index_code}) 的成分股列表。")
             return None
             
-        # 3. 合并所有收盘价，并计算等权重收益率
+        # 1. 在循环前初始化 all_closes
+        all_closes = []
+        
+        # 2. 循环下载成分股数据
+        for stock_code in tqdm(constituents, desc=f"下载 '{name_to_show}' ({index_code}) 的成分股", leave=False):
+            stock_df = _get_ohlcv_data_bs(stock_code, start_date, end_date, cache_dir, keyword=stock_code)
+            if stock_df is not None and not stock_df.empty:
+                all_closes.append(stock_df['close'].rename(stock_code))
+            time.sleep(0.05)
+
+        # 3. 在循环后检查 all_closes 是否为空
+        if not all_closes:
+            print(f"    - 错误: 未能为 '{name_to_show}' ({index_code}) 下载到任何有效的成分股数据。")
+            return None
+            
+        # 4. 合并所有收盘价，并计算等权重指数 (这部分逻辑是正确的)
         all_closes_df = pd.concat(all_closes, axis=1)
         daily_returns = all_closes_df.pct_change().fillna(0)
-        
-        # 计算每日的等权重平均收益率
         equal_weighted_return = daily_returns.mean(axis=1)
-        
-        # 4. 根据收益率序列，构建一个虚拟的指数净值序列
         initial_value = 1000
         index_series = initial_value * (1 + equal_weighted_return).cumprod()
         
-        # 构建一个符合格式的 DataFrame
         synthetic_index_df = pd.DataFrame({'close': index_series})
-        # 补全 OHLCV
         synthetic_index_df['open'] = synthetic_index_df['high'] = synthetic_index_df['low'] = synthetic_index_df['close']
         synthetic_index_df['volume'] = 0
         
-        print(f"    - SUCCESS: 已在本地成功合成 {index_code} 的等权重指数。")
+        print(f"    - SUCCESS: 已在本地成功合成 '{name_to_show}' ({index_code}) 的等权重指数。")
         return synthetic_index_df
 
     except Exception as e:
-        print(f"    - ERROR: 在本地合成指数时发生未知错误: {e}")
+        print(f"    - 错误: 在本地合成指数 '{name_to_show}' ({index_code}) 时发生未知错误: {e}")
         return None
 
 def _get_us_stock_data_yf(ticker: str, start_date: str, end_date: str, cache_dir: Path, 
@@ -424,9 +439,13 @@ def _get_market_sentiment_data_ak(start_date: str, end_date: str, cache_dir: Pat
 
 def get_full_feature_df(
     ticker: str, 
-    config: Dict, 
+    config: Dict,
+    # 直接接收计算好的日期字符串
+    start_date_str: str,
+    end_date_str: str,
     keyword: str = None, 
     prediction_mode: bool = False, 
+    # 接收所有预先生成的全局 DataFrame
     market_breadth_df: Optional[pd.DataFrame] = None,
     external_market_df: Optional[pd.DataFrame] = None,
     market_sentiment_df: Optional[pd.DataFrame] = None,
@@ -434,150 +453,121 @@ def get_full_feature_df(
     factors_df: Optional[pd.DataFrame] = None
 ) -> Optional[pd.DataFrame]:
     """
-    为单个股票执行完整的特征生成流程，实现了：
-    - 智能的、解耦 Tushare 的指数数据获取。
-    - 基于多因子模型的 Alpha 标签计算，并能优雅地回退。
-    - 灵活的日期窗口策略（训练/预测/增量模式）。
+    为单个股票执行完整的特征生成流程。
+    需要所有全局性数据和运行日期都已预先确定并通过参数传入。
+    只负责获取与该股票直接相关的行情数据、合并数据并执行计算。
     """
     display_name = keyword if keyword else ticker
-    print(f"\n--- 为 {display_name} ({ticker}) 生成特征 ---")
+    print(f"\n--- 正在为 {display_name} ({ticker}) 生成特征 ---")
     
+    # 合并全局、策略和个股的配置，以个股配置为最高优先级
     global_settings = config.get('global_settings', {})
     strategy_config = config.get('strategy_config', {})
     stock_info = next((s for s in config.get('stocks_to_process', []) if s['ticker'] == ticker), {})
     run_config = {**global_settings, **strategy_config, **stock_info}
 
-    runtime_start_date = run_config.get('earliest_start_date'); runtime_end_date = run_config.get('end_date')
-
-    if pd.notna(pd.to_datetime(runtime_start_date, errors='coerce')) and pd.notna(pd.to_datetime(runtime_end_date, errors='coerce')):
-        start_date_dt, end_date_dt = pd.to_datetime(runtime_start_date), pd.to_datetime(runtime_end_date)
-    elif prediction_mode:
-        end_date_dt, start_date_dt = pd.Timestamp.now(), pd.Timestamp.now() - pd.DateOffset(days=300)
-    else:
-        end_date_dt = pd.to_datetime(run_config.get('end_date'))
-        lookback_years, earliest_start_date_dt = run_config.get('data_lookback_years', 10), pd.to_datetime(run_config.get('earliest_start_date'))
-        if not end_date_dt or not earliest_start_date_dt: 
-            print("ERROR: 'end_date' or 'earliest_start_date' not found."); return None
-        target_start_date_dt = end_date_dt - pd.DateOffset(years=lookback_years)
-        start_date_dt = max(target_start_date_dt, earliest_start_date_dt)
-    
-    start_date_str, end_date_str = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
+    # 直接使用传入的日期
     print(f"  - 数据窗口: {start_date_str} to {end_date_str}")
     
-    # --- 1. 数据获取 ---
+    # --- 1. 数据获取 (只获取个股相关数据) ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
-    # 获取个股OHLCV
+    
     df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
-    if df is None: return None
+    if df is None:
+        raise ValueError(f"为 {display_name} ({ticker}) 获取基础 OHLCV 数据失败，返回了 None.")
 
-    # 获取与个股相关的行业指数
     industry_ticker = run_config.get('industry_etf')
     industry_df = _get_index_data_bs(industry_ticker, start_date_str, end_date_str, cache_dir, display_name=f"{keyword}的行业指数")
     
-    # 获取基准指数 (虽然也是全局的，但通常与个股一同获取)
     benchmark_ticker = run_config.get('benchmark_ticker')
     benchmark_df = _get_index_data_bs(benchmark_ticker, start_date_str, end_date_str, cache_dir, display_name="基准指数")
-    
-    # --- 2. 基础特征计算 ---
+
+    # --- 2. 数据合并 ---
     if market_breadth_df is not None:
         df = df.join(market_breadth_df, how='left')
     if market_sentiment_df is not None:
         df = df.join(market_sentiment_df, how='left')
-        df[market_sentiment_df.columns] = df[market_sentiment_df.columns].ffill() # 情绪数据需要前向填充
+        df[market_sentiment_df.columns] = df[market_sentiment_df.columns].ffill()
     if macro_df is not None:
         df = pd.merge_asof(df, macro_df, left_index=True, right_index=True, direction='backward')
     
-    # 合并个股相关数据
     if benchmark_df is not None:
         df = df.join(benchmark_df['close'].rename('benchmark_close'), how='left')
     if industry_df is not None:
         df = df.join(industry_df['close'].rename('industry_close'), how='left')
-    
-    # --- 3. 特征后处理 ---
+        
+    # --- 3. 特征计算 ---
     run_config_with_api = {**run_config, 'tushare_pro_instance': pro, 'ticker': ticker}
-    extra_data_for_calc = {'external_market_df': external_market_df} # 外部市场数据在这里传入计算器
+    extra_data_for_calc = {'external_market_df': external_market_df}
     df = feature_calculators.run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
     
     # --- 4. 特征后处理 ---
-    df = run_all_feature_postprocessors(df, run_config, factors_df=factors_df)
-
-    # 5. --- 数据清洗和校验 ---
+    extra_data_for_post = {
+        'factors_df': factors_df,
+        'ticker': ticker,
+        'keyword': display_name
+    }
+    df = run_all_feature_postprocessors(df, run_config, **extra_data_for_post)
+        
+    # --- 5. 数据清洗和校验 ---
     ffill_limit = run_config.get("ffill_limit", 5)
     df.ffill(inplace=True, limit=ffill_limit)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    label_col = run_config.get('label_column', 'label_alpha')
+    label_col = run_config.get('label_column')
 
-    if label_col not in df.columns:
-        print(f"错误: 关键错误！在数据处理流程完成后，config中定义的标签列 '{label_col}' 未在最终的DataFrame中找到。")
-        print(f"      这通常意味着标签计算步骤失败或被意外覆盖。")
-        print(f"      当前的列名是: {df.columns.tolist()}")
-        return None # 中断流程，防止生成错误的缓存数据
-
-    if label_col in df.columns: df.dropna(subset=[label_col], inplace=True)
+    if label_col in df.columns:
+        df.dropna(subset=[label_col], inplace=True)
     
     feature_cols = [col for col in df.columns if col != label_col and not col.startswith('future_')]
     df.dropna(subset=feature_cols, inplace=True)
     
-    if df.empty: 
-        print(f"警告: {display_name} 的 DataFrame 在处理后为空。"); return None
+    if df.empty:
+        raise ValueError(f"为 {display_name} ({ticker}) 处理的数据在 dropna 操作后变为空。请检查数据质量或时间范围。")
     
     validator = data_contracts.DataValidator(run_config)
-    if not validator.validate_schema(df): 
-        print(f"错误: {display_name} 的最终数据校验失败。"); return None
+    if not validator.validate_schema(df):
+        raise ValueError(f"{display_name} ({ticker}) 的最终数据未能通过 Schema 校验。请查看上方的详细错误日志。")
         
-    print(f"--- 成功为 {display_name} 生成特征. 维度: {df.shape} ---")
+    print(f"--- SUCCESS: 成功为 {display_name} ({ticker}) 生成特征. 维度: {df.shape} ---")
     return df
 
 def process_all_from_config(config: dict, tickers_to_generate: list = None) -> Dict[str, pd.DataFrame]:
     """
-    根据配置文件，为指定的股票列表生成特征。
-    如果 tickers_to_generate 为 None，则处理所有股票。
+    根据传入的 config 字典，为指定的股票列表生成特征。
+    在循环处理个股前，会一次性准备好所有全局性数据。
     """
     if not config:
         print("错误: 传入的 config 字典为空。"); return {}
     
-    # --- 核心变化：不再需要从文件加载 config ---
-    
-    # --- 逻辑简化：直接从传入的 config 中获取 start_date ---
-    strategy_config = config.get('strategy_config', {})
-    # get_runtime_date_range 的逻辑已经被移到 run_data_pipeline 中了
-    start_date_str = strategy_config['start_date'] # 直接读取注入的值
-    end_date_str = strategy_config['end_date']
-    
     # --- 1. 在循环外准备所有全局数据 ---
-    end_date_dt = pd.to_datetime(config['strategy_config']['end_date'])
-    lookback_years = config['strategy_config'].get('data_lookback_years', 10)
-    earliest_start_date_dt = pd.to_datetime(config['strategy_config']['earliest_start_date'])
-    target_start_date_dt = end_date_dt - pd.DateOffset(years=lookback_years)
-    start_date_dt = max(target_start_date_dt, earliest_start_date_dt)
-    start_date_str, end_date_str = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
+    strategy_config = config.get('strategy_config', {})
+    start_date_str = strategy_config.get('start_date')
+    end_date_str = strategy_config.get('end_date')
+    if not all([start_date_str, end_date_str]):
+        print(f"错误: config 字典中缺少 'start_date' 或 'end_date'。"); return {}
     
     cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
+    print("\n--- 正在准备所有全局市场数据 (此过程只运行一次) ---")
 
-    print("\n--- 正在准备全局市场数据---")
     breadth_df = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
     time.sleep(0.5)
 
-        # (新增) 获取外部市场数据
     external_market_df = None
-    external_tickers = config.get('strategy_config', {}).get('external_market_tickers', [])
+    external_tickers = strategy_config.get('external_market_tickers', [])
     if external_tickers:
-        ext_ticker = external_tickers[0] # 暂时只用第一个
+        ext_ticker = external_tickers[0]
         external_market_df = _get_us_stock_data_yf(ext_ticker, start_date_str, end_date_str, cache_dir)
         if external_market_df is not None:
             external_market_df.rename(columns={'close': 'close_ext', 'open': 'open_ext', 'volume': 'volume_ext'}, inplace=True)
     time.sleep(0.5)
 
-    # (新增) 获取市场情绪数据
     sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
     time.sleep(0.5)
     
-    # (新增) 获取宏观经济数据
     macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str, config)
     time.sleep(0.5)
 
-    # (新增) 获取法马-佛伦奇三因子数据
     factors_df = _get_fama_french_factors(start_date_str, end_date_str)
     
     print("--- 所有全局市场数据准备完毕 ---\n")
@@ -586,32 +576,37 @@ def process_all_from_config(config: dict, tickers_to_generate: list = None) -> D
     results_df = {}
     stocks_to_process = config.get('stocks_to_process', [])
     if not stocks_to_process:
-        print("WARNNING: 'stocks_to_process' list is empty. No data will be processed."); return {}
+        print("警告: 'stocks_to_process' 列表为空，不处理任何数据。"); return {}
     
-    # 如果指定了目标列表，就只循环这个列表
+    target_stocks = stocks_to_process
     if tickers_to_generate:
-        # 从完整的股票池中筛选出需要处理的 stock_info
         target_stocks = [s for s in stocks_to_process if s['ticker'] in tickers_to_generate]
-    else:
-        # 否则，处理全部
-        target_stocks = stocks_to_process
 
     for i, stock_info in enumerate(target_stocks, 1):
         ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
         if not ticker: 
-            print(f"  - WARNNING: Skipping invalid config entry at index {i-1} (missing ticker)."); continue
+            print(f"  - 警告: 跳过索引为 {i-1} 的无效配置项 (缺少 ticker)。"); continue
         
-        df = get_full_feature_df(
-            ticker=ticker, 
-            config=config, 
-            keyword=keyword, 
-            market_breadth_df=breadth_df,
-            external_market_df=external_market_df,
-            market_sentiment_df=sentiment_df,
-            macro_df=macro_df,
-            factors_df=factors_df
-        )
-        if df is not None: results_df[ticker] = df
+        try:
+            df = get_full_feature_df(
+                ticker=ticker, 
+                config=config, 
+                start_date_str=start_date_str,
+                end_date_str=end_date_str,
+                keyword=keyword, 
+                market_breadth_df=breadth_df,
+                external_market_df=external_market_df,
+                market_sentiment_df=sentiment_df,
+                macro_df=macro_df,
+                factors_df=factors_df
+            )
+            if df is not None:
+                results_df[ticker] = df
+        except (ValueError, KeyError) as e:
+            print(f"在处理 {keyword} ({ticker}) 时发生严重错误，已跳过该股票。")
+            print(f"错误详情: {e}")
+            continue
+        
         time.sleep(0.2)
     
     print("--- 批量特征生成流程完成 ---")

@@ -265,4 +265,11 @@ class LSTMBuilder:
         if self.verbose:
             print(f"    - 最终模型训练已在 {final_epochs} 轮后完成。")
 
-        return {'model': model, 'scaler': final_scaler}
+        return {
+            'model': model, 
+            'scaler': final_scaler,
+            'metadata': {
+                'input_size': X_full.shape[2],
+                'feature_cols': features 
+            }
+        }

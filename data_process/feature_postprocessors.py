@@ -99,51 +99,127 @@ class AlphaLabelCalculator(FeaturePostprocessor):
         return df
 
 class RawReturnLabelCalculator(FeaturePostprocessor):
-    """(回退) 计算原始的未来收益率作为标签。"""
+    """
+    计算原始的未来收益率作为标签。
+    """
     def process(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        if self.config.get('global_settings', {}).get('verbose', True):
-            print("  - [Post-processing] (Fallback) Running: Raw Return Label Calculator...")
-        run_config = {**self.config.get('global_settings', {}), **self.config.get('strategy_config', {})}
-        horizon = run_config.get("labeling_horizon", 30)
+        keyword = kwargs.get('keyword', '未知股票')
+        ticker = kwargs.get('ticker', '未知代码')
         
-        # 直接从 global_settings 读取，不再提供可能导致混淆的默认值
-        # 如果 config 中没有 label_column，就让它报错，因为这是一个关键配置
+        print(f"\n  --- [数据后处理] INFO: 为 {keyword} ({ticker}) 计算原始收益率标签... ---")
+        
         try:
-            label_col = self.config['global_settings']['label_column']
-        except KeyError:
-            print("错误: 在 global_settings 中未找到关键配置 'label_column'。无法计算标签。")
-            return df
-        
-        df[label_col] = df['close'].pct_change(periods=horizon).shift(-horizon)
-        
-        # 对标签进行去极值处理
-        # 检查列是否存在，防止 pct_change 后全是 NaN
-        if label_col in df.columns and not df[label_col].isnull().all():
-            lower_bound, upper_bound = df[label_col].quantile(0.01), df[label_col].quantile(0.99)
-            df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
+            # 1. 检查输入数据
+            if df.empty:
+                print(f"    - WARNNING: 为 {keyword} ({ticker}) 输入的 DataFrame 为空，无法计算标签。")
+                return df
+            if 'close' not in df.columns:
+                print(f"    - ERROR: 为 {keyword} ({ticker}) 输入的 DataFrame 中缺少 'close' 列。")
+                return df
+
+            # 2. 获取配置
+            # self.config 已经是合并后的 run_config，我们可以直接从顶层获取
+            horizon = self.config.get("labeling_horizon")
+            label_col = self.config.get("label_column")
+
+            # 增加对关键配置是否存在的检查
+            if not all([horizon, label_col]):
+                missing_keys = []
+                if not horizon: missing_keys.append("'labeling_horizon'")
+                if not label_col: missing_keys.append("'label_column'")
+                print(f"    - ERROR: 配置不完整，缺少关键键: {', '.join(missing_keys)}。无法计算标签。")
+                return df
+
+            print(f"    - INFO: 将使用标签列名 '{label_col}'，预测未来 {horizon} 天的收益率。")
+
+            # 3. 执行核心计算
+            print(f"    - INFO: 正在对 'close' 列执行 pct_change(periods={horizon}).shift(-{horizon})...")
+            future_returns = df['close'].pct_change(periods=horizon).shift(-horizon)
             
-        return df
+            # 4. 检查计算结果
+            nan_count = future_returns.isnull().sum()
+            total_count = len(future_returns)
+            print(f"    - INFO: 计算完成。结果包含 {nan_count} 个 NaN 值 (共 {total_count} 行)。")
+
+            if nan_count == total_count:
+                print(f"    - WARNNING: 计算出的未来收益率序列全部为 NaN。这可能是因为数据量 ({total_count}) 小于预测周期 ({horizon})。")
+            
+            # 5. 赋值
+            df[label_col] = future_returns
+            print(f"    - INFO: 已成功将计算结果添加到 DataFrame 的 '{label_col}' 列。")
+
+            # 6. 去极值处理
+            if label_col in df.columns and not df[label_col].isnull().all():
+                print("    - INFO: 正在对标签列进行去极值处理 (clip at 1% and 99%)...")
+                lower_bound, upper_bound = df[label_col].quantile(0.01), df[label_col].quantile(0.99)
+                df[label_col] = df[label_col].clip(lower=lower_bound, upper=upper_bound)
+            
+            print(f"  --- 成功为 {keyword} ({ticker}) 生成原始收益率标签 ---")
+            return df
+
+        except Exception as e:
+            print(f"    - 致命错误: 在 RawReturnLabelCalculator 内部为 {keyword} ({ticker}) 计算时发生意外异常: {e}")
+            import traceback
+            traceback.print_exc() # 打印完整的错误堆栈
+            # 返回原始df，避免破坏流程
+            return df
 
 class CorrelationSelector(FeaturePostprocessor):
-    """根据相关性剔除冗余特征。"""
+    """
+    (修复后) 根据相关性剔除冗余特征。
+    此版本会明确地将标签列从相关性分析中排除。
+    """
     def process(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print("  - [Post-processing] Running: Correlation Selector...")
         
+        # --- (修改开始) ---
+        
+        # 1. 合并配置，以便轻松访问所有参数
         run_config = {**self.config.get('global_settings', {}), **self.config.get('strategy_config', {})}
-        core_features = {'open', 'high', 'low', 'close', 'volume'}
+        
+        # 2. 定义不应参与相关性筛选的核心列和标签列
+        # 核心的 OHLCV 数据不应被移除
+        features_to_exclude = {'open', 'high', 'low', 'close', 'volume'}
+        
+        # 从配置中获取标签列的名称，并将其加入排除列表
+        label_col = run_config.get('label_column')
+        if label_col:
+            features_to_exclude.add(label_col)
+            
+        # 3. 筛选出所有数值类型的特征列
         numeric_df = df.select_dtypes(include=np.number)
-        features_to_check = [col for col in numeric_df.columns if col not in core_features and not col.startswith('future_')]
-        if not features_to_check: return df
+        
+        # 4. 确定最终要进行相关性检查的特征列表
+        # 排除核心列、标签列以及所有代表未来信息的列
+        features_to_check = [
+            col for col in numeric_df.columns 
+            if col not in features_to_exclude and not col.startswith('future_')
+        ]
+        
+        # --- (修改结束) ---
+
+        if not features_to_check:
+            if self.config.get('global_settings', {}).get('verbose', True):
+                print("    - INFO: No features available for correlation check. Skipping.")
+            return df
+        
+        # --- (后续逻辑完全不变) ---
         
         corr_matrix = numeric_df[features_to_check].corr().abs()
         upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
         threshold = run_config.get("correlation_threshold", 0.90)
+        
         to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > threshold)]
+        
         if to_drop:
             df.drop(columns=to_drop, inplace=True, errors='ignore')
             if self.config.get('global_settings', {}).get('verbose', True):
-                print(f"    - Removed {len(to_drop)} highly correlated features.")
+                print(f"    - Removed {len(to_drop)} highly correlated features: {to_drop}")
+        else:
+            if self.config.get('global_settings', {}).get('verbose', True):
+                print("    - INFO: No highly correlated features found to remove.")
+                
         return df
 
 # --- 注册并运行所有后处理器 ---
@@ -154,27 +230,41 @@ ALL_POSTPROCESSORS = [
 
 def run_all_feature_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:
     """
-    运行所有后处理器。
-    这现在是所有后处理逻辑（包括标签生成）的唯一入口点。
+    (已最终修复) 运行所有后处理器。
+    确保了包含 ticker 和 keyword 的 kwargs 在所有调用链中被正确传递。
     """
     df_copy = df.copy()
     
-    # --- 2.1 运行通用后处理器 ---
+    # --- 1. 运行通用后处理器 ---
+    # 此循环现在可以正确地将 kwargs 传递给每个 process 方法
     for processor_class in ALL_POSTPROCESSORS:
         processor = processor_class(config)
         df_copy = processor.process(df_copy, **kwargs)
 
-    # --- 2.2 根据传入的`kwargs`决定运行哪个标签计算器 ---
+    # --- 2. (已重构) 根据配置明确选择标签计算器 ---
+    strategy_cfg = config.get('strategy_config', {})
+    labeling_method = strategy_cfg.get('labeling_method', 'raw_return') 
+    
     factors_df = kwargs.get('factors_df')
-    if factors_df is not None:
-        if config.get('global_settings', {}).get('verbose', True):
-            print("INFO: Factor data provided. Using AlphaLabelCalculator.")
+    keyword = kwargs.get('keyword', '未知股票')
+    ticker = kwargs.get('ticker', '未知代码')
+
+    # 逻辑分支：只有当用户明确要求使用 'alpha' 且因子数据确实存在时，才使用 AlphaLabelCalculator
+    if labeling_method.lower() == 'alpha' and factors_df is not None:
+        print(f"  - [数据后处理] INFO: 对于 {keyword} ({ticker})，配置要求使用 'alpha' 标签且因子数据可用。正在运行 Alpha 标签计算器。")
         label_calculator = AlphaLabelCalculator(config)
-        df_copy = label_calculator.process(df_copy, factors_df=factors_df)
+        
+        # (核心修复点) 将 kwargs 传递给 AlphaLabelCalculator 的 process 方法
+        df_copy = label_calculator.process(df_copy, factors_df=factors_df, **kwargs)
+    
+    # 在所有其他情况下 (要求 alpha 但因子数据缺失，或直接要求 raw_return)，都使用 RawReturnLabelCalculator
     else:
-        if config.get('global_settings', {}).get('verbose', True):
-            print("INFO: Factor data not provided. Falling back to RawReturnLabelCalculator.")
+        if labeling_method.lower() == 'alpha' and factors_df is None:
+            print(f"  - [数据后处理] WARNNING: 对于 {keyword} ({ticker})，配置要求使用 'alpha' 标签，但因子数据不可用。将回退至【原始收益率】标签。")
+        
         label_calculator = RawReturnLabelCalculator(config)
-        df_copy = label_calculator.process(df_copy)
+        
+        # (核心修复点) 将 kwargs 传递给 RawReturnLabelCalculator 的 process 方法
+        df_copy = label_calculator.process(df_copy, **kwargs)
         
     return df_copy

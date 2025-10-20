@@ -157,10 +157,22 @@ def run_training_for_ticker(
         timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         model_file = model_dir / f"{model_type}_model_{timestamp}{model_suffix}"
         scaler_file = model_dir / f"{model_type}_scaler_{timestamp}.pkl"
+        
         joblib.dump(final_artifacts['scaler'], scaler_file)
-        if model_type == 'lstm': torch.save(final_artifacts['model'].state_dict(), model_file)
-        else: joblib.dump(final_artifacts['models'], model_file)
+        if model_type == 'lstm':
+            # 保存模型权重
+            torch.save(final_artifacts['model'].state_dict(), model_file)
+            
+            # (新增) 保存元数据
+            meta_file = model_dir / f"{model_type}_meta_{timestamp}.json"
+            with open(meta_file, 'w', encoding='utf-8') as f:
+                json.dump(final_artifacts['metadata'], f, indent=4)
+            print(f"INFO: LSTM 元数据已保存: {meta_file.name}")
+
+        else: # lgbm
+            joblib.dump(final_artifacts['models'], model_file)
         print(f"SUCCESS: 新版本模型已保存: {model_file.name}")
+
         num_to_keep = config.get('global_settings', {}).get('num_model_versions_to_keep', 3)
         all_model_versions = sorted(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
         
@@ -183,6 +195,13 @@ def run_training_for_ticker(
                         print(f"  - SUCCESS: 已清理旧 Scaler: {old_scaler_path.name}")
                 except Exception as e:
                     print(f"  - ERROR: 清理失败: {old_model_path.name}, 原因: {e}")
+                
+                if model_type == 'lstm':
+                    old_meta_name = old_model_path.name.replace("model", "meta").replace(model_suffix, ".json")
+                    old_meta_path = old_model_path.parent / old_meta_name
+                    if old_meta_path.exists():
+                        old_meta_path.unlink()
+                        print(f"  - SUCCESS: 已清理旧 Meta: {old_meta_path.name}")
 
     if ic_history_path.exists():
         return pd.read_csv(ic_history_path)

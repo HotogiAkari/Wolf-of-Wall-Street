@@ -39,69 +39,87 @@ def get_config_hash_for_ticker(global_settings: Dict, strategy_config: Dict, sto
 def get_processed_data_path(stock_info: dict, config: dict) -> Path:
     """
     根据配置，为指定股票生成其处理后数据文件的确定性路径。
-    这是定位数据文件的唯一官方途径。
+    路径的生成现在只依赖于静态配置，与动态计算的 start_date 解耦。
     """
     global_settings = config.get('global_settings', {})
     strategy_config = config.get('strategy_config', {})
     
+    # 1. 计算配置哈希
     config_hash = get_config_hash_for_ticker(global_settings, strategy_config, stock_info)
     
+    # 2. 构建路径时不使用 start_date
     output_dir_base = global_settings.get('output_dir', 'data/processed')
-    start_date = strategy_config.get('start_date')
-    end_date = strategy_config.get('end_date')
-    date_range_str = f"{start_date}_to_{end_date}"
     ticker = stock_info['ticker']
-
-    target_dir = Path(output_dir_base) / ticker / date_range_str
-    return target_dir / f"features_{config_hash}.pkl"
+    
+    # 新的目录结构：{output_dir}/{ticker}/{config_hash}/
+    # 文件名固定为 features.pkl
+    target_dir = Path(output_dir_base) / ticker / config_hash
+    return target_dir / "features.pkl"
 
 def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
     """
     将处理好的数据字典以确定性的方式保存到磁盘。
+    同时保存一个 meta.json 文件来记录本次生成的动态信息。
     """
     if not processed_data:
-        print("没有需要保存的数据。")
+        print("INFO: 没有需要保存的数据。")
         return
         
     stocks_config_map = {s['ticker']: s for s in config.get('stocks_to_process', [])}
     
-    print("保存处理好的数据...")
+    # 从 config 中获取本次运行的日期范围
+    start_date = config['strategy_config'].get('start_date', 'N/A')
+    end_date = config['strategy_config'].get('end_date', 'N/A')
+    
+    print("--- 正在保存处理好的数据... ---")
     
     for ticker, df in processed_data.items():
         try:
             stock_specific_config = stocks_config_map.get(ticker)
             if not stock_specific_config: continue
+            
+            keyword = stock_specific_config.get('keyword', ticker)
 
-            # 使用统一的路径函数来获取保存路径，它只依赖静态配置
             target_file_path = get_processed_data_path(stock_specific_config, config)
             target_dir = target_file_path.parent
             target_dir.mkdir(parents=True, exist_ok=True)
 
             if target_file_path.exists():
-                print(f"  - INFO: 数据文件已存在于 {target_file_path}，跳过保存 {ticker}。")
+                print(f"  - INFO: 数据文件已存在于 {target_file_path}，跳过保存 {keyword} ({ticker})。")
                 continue
             
-            print(f"\n  - 正在保存 {ticker} 的数据...")
+            print(f"\n  - 正在保存 {keyword} ({ticker}) 的数据...")
+            
+            # 1. 保存数据文件
             df.to_pickle(target_file_path)
+            
+            # 2. (新增) 保存元数据文件
+            meta_data = {
+                'ticker': ticker,
+                'keyword': keyword,
+                'generated_at': pd.Timestamp.now().isoformat(),
+                'data_start_date': start_date,
+                'data_end_date': end_date,
+                'config_hash': target_dir.name,
+                'file_path': str(target_file_path)
+            }
+            meta_file_path = target_dir / "meta.json"
+            with open(meta_file_path, 'w', encoding='utf-8') as f:
+                json.dump(meta_data, f, indent=4)
+
             print(f"    - SUCCESS: 数据已成功保存至: {target_file_path}")
+            print(f"    - INFO: 元信息已保存至: {meta_file_path}")
 
         except Exception as e:
-            print(f"    - ERROR: 保存 {ticker} 数据时发生错误: {e}")
+            print(f"    - ERROR: 保存 {keyword} ({ticker}) 数据时发生错误: {e}")
             
-    print("--- 所有数据保存完毕。 ---")
+    print("\n--- 所有数据保存完毕。 ---")
 
-def run_data_pipeline(config_path: str):
+def run_data_pipeline(config: dict):
     """
     主执行函数：智能地处理数据。
     """
-    print("开始执行数据管道协调任务..."); print(f"将使用配置文件: {config_path}")
-    
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f) if config_path.endswith(('.yaml', '.yml')) else json.load(f)
-    except Exception as e:
-        print(f"错误: 无法加载或解析配置文件 '{config_path}': {e}")
-        return
+    print("开始执行数据管道协调任务...")
     
     strategy_config = config.get('strategy_config', {})
     
@@ -117,9 +135,9 @@ def run_data_pipeline(config_path: str):
         
         calculated_start_date = start_date_dt.strftime('%Y-%m-%d')
         
-        # 将计算结果“注入”回 config 字典，供后续所有函数使用
+        # 将计算结果“注入”回传入的 config 字典中
         config['strategy_config']['start_date'] = calculated_start_date
-        print(f"      计算得出的 start_date 为: {calculated_start_date}，已更新到本次运行的配置中。")
+        print(f"      计算得出的 start_date 为: {calculated_start_date}，已更新到本次运行的全局配置中。")
 
     except KeyError as e:
         print(f"错误: 动态计算 start_date 失败，因为缺少关键配置项: {e}。")
@@ -136,7 +154,8 @@ def run_data_pipeline(config_path: str):
         target_file_path = get_processed_data_path(stock_info, config)
         if target_file_path.exists():
             keyword = stock_info.get('keyword', stock_info.get('ticker'))
-            print(f"INFO: 特征文件已存在于 {target_file_path}，跳过 {keyword} 的数据处理。")
+            ticker = stock_info.get('ticker')
+            print(f"INFO: 特征文件已存在于 {target_file_path}，跳过 {keyword} ({ticker}) 的数据处理。")
         else:
             # 如果文件不存在，则将该股票加入待处理列表
             tickers_to_generate.append(stock_info['ticker'])
@@ -144,8 +163,10 @@ def run_data_pipeline(config_path: str):
     if not tickers_to_generate:
         print("\n所有股票的特征文件均已存在。无需执行数据处理流水线。")
         return
-        
-    print(f"\n需要为以下 {len(tickers_to_generate)} 只股票生成新数据: {tickers_to_generate}")
+    
+    ticker_to_keyword_map = {s['ticker']: s.get('keyword', s['ticker']) for s in stocks_to_process}
+    display_list = [f"{ticker_to_keyword_map.get(t, t)} ({t})" for t in tickers_to_generate]    
+    print(f"\n需要为以下 {len(tickers_to_generate)} 只股票生成新数据: {display_list}")
 
     processed_data = process_all_from_config(config, tickers_to_generate=tickers_to_generate)
 

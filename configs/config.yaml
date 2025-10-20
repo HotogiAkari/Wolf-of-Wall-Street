@@ -4,16 +4,17 @@
 # --- 1. 全局设定 ---
 # 这部分参数定义了项目的基本环境和全局行为. 
 global_settings:
-  seed: 64                      # 全局随机种子. 用于保证所有涉及随机性的操作（如模型训练, 数据采样）的结果都可以被复现. 
-  device: 'gpu'                 # 默认计算设备. 'gpu' 会优先使用 CUDA，如果不可用则自动切换到 'cpu'. 'cpu' 则强制使用 CPU. 
-  model_dir: 'models'           # 存放所有已训练模型, scaler 和 IC 历史记录的主目录. 
-  data_cache_dir: 'data/data_cache'  # 用于缓存从 API 下载的原始数据的目录，避免重复下载，加快后续运行速度. 
-  output_dir: 'data/processed'  # 存放 L2（特征数据）和 L3（预处理数据）缓存的目录. 
-  raw_ohlcv_cache_dir: 'raw_ohlcv' # 在 data_cache_dir 下存放原始 OHLCV 数据的子目录名. 
-  ic_history_file: 'ic_history.csv' # 训练结束后，用于保存所有模型聚合后 IC 历史记录的文件名. 
+  seed: 64                            # 全局随机种子. 用于保证所有涉及随机性的操作（如模型训练, 数据采样）的结果都可以被复现. 
+  device: 'gpu'                       # 默认计算设备. 'gpu' 会优先使用 CUDA，如果不可用则自动切换到 'cpu'. 'cpu' 则强制使用 CPU. 
+  model_dir: 'data/models'            # 存放所有已训练模型, scaler 和 IC 历史记录的主目录.
+  hpo_log_dir: 'data/hpo_logs'             # HPO 结果日志的存放目录.
+  data_cache_dir: 'data/data_cache'   # 用于缓存从 API 下载的原始数据的目录，避免重复下载，加快后续运行速度. 
+  output_dir: 'data/processed'        # 存放 L2（特征数据）和 L3（预处理数据）缓存的目录. 
+  raw_ohlcv_cache_dir: 'raw_ohlcv'    # 在 data_cache_dir 下存放原始 OHLCV 数据的子目录名. 
+  ic_history_file: 'ic_history.csv'   # 训练结束后，用于保存所有模型聚合后 IC 历史记录的文件名. 
   order_history_db: 'order_history.db' # 交易历史 SQLite 数据库的文件名，由 risk_manager 使用. 
-  num_model_versions_to_keep: 3 # 模型版本控制. 对于每只股票的每个模型，只保留最近的 N 个版本，旧版本会被自动清理. 
-  use_lstm_globally: True       # 是否为股票训练LSTM模型(每只股票可以单独定义)
+  num_model_versions_to_keep: 3       # 模型版本控制. 对于每只股票的每个模型，只保留最近的 N 个版本，旧版本会被自动清理. 
+  use_lstm_globally: True             # 是否为股票训练LSTM模型(每只股票可以单独定义)
 
   tushare_api_token: 'TUSHARE_TOKEN' # 请在这里填入Tushare Token
   
@@ -89,10 +90,11 @@ strategy_config:
   val_window: 45                # 验证窗口的大小，也作为每次滚动的步长（交易日）(训练模型的预测天数). 
   
   # 特征工程参数
-  labeling_horizon: 45          # 定义标签的预测周期，即预测未来 N 天的收益率. 
-  correlation_window: 120        # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小. 
+  labeling_horizon: 45          # 定义标签的预测周期，即模型需要预测未来 N 天的收益率. 
+  correlation_window: 120       # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小. 
   correlation_threshold: 0.95   # 初步特征筛选的阈值. 如果两个特征的相关性绝对值高于此值，则会移除其中一个，以减少共线性. 
-  ffill_limit: 10                # 前向填充缺失值的最大连续天数. 用于处理节假日等造成的少量数据空洞. 
+  ffill_limit: 10               # 前向填充缺失值的最大连续天数. 用于处理节假日等造成的少量数据空洞. 
+  labeling_method: 'raw_return' # 标签生成方法. 可选值: 'raw_return' (推荐, 默认) 或 'alpha'. raw 使用未来的原始收益率作为预测目标. alpha 使用 Fama-French 三因子模型计算超额收益 (Alpha) 作为预测目标, 需要 Tushare Pro API 的支持. 若获取因子失败,会退回raw.
   
   # 模型融合策略 (用于未来实盘预测)
   fusion_ic_span: 120           # 在计算模型动态权重时，IC 的指数加权移动平均（EWMA）的 span 参数，值越大权重变化越平滑. 
@@ -123,8 +125,8 @@ strategy_config:
     - "3blackcrows"         # 三只乌鸦：强烈的看跌反转/持续信号
     - "marubozu"            # 光头光脚：单方向的极致动量信号
     # 趋势持续形态
-    - "rising3methods"      # 上升三法：强看涨持续信号
-    - "falling3methods"     # 下降三法：强看跌持续信号
+    # - "rising3methods"      # 上升三法：强看涨持续信号
+    # - "falling3methods"     # 下降三法：强看跌持续信号
     # 经典反转形态
     - "harami"              # 孕线形态：趋势动力减弱信号
     - "piercing"            # 刺透形态：底部反转信号
@@ -157,12 +159,21 @@ strategy_config:
     - "GLD"     # 黄金ETF, 代表避险情绪
     - "TLT"     # 美国20+年国债ETF, 代表利率和风险偏好
 
+# 回测与业绩评估设定
+backtest_settings:
+  # 当模型预测的未来收益率绝对值超过此阈值时，产生交易信号 (1: 做多, -1: 做空)。
+  signal_threshold: 0.005 # 0.5%
+
+  # 每次换仓（从多到空，从空到多，从有仓位到空仓）时，扣除的交易成本（双边）。
+  transaction_cost: 0.001   # 0.1%
+
 # --- 3. HPO (超参数优化) 设定 ---
 hpo_config:
   # 全局 HPO 设置 (作为回退的默认值)
   n_trials: 20                  # 全局默认的试验次数. 
   hpo_num_eval_folds: 2         # 全局默认的 HPO 内部评估验证集数量. 
-  tickers_for_hpo: ['000100.SZ', '000426.SZ', '000001.SZ'] # 指定一个股票子集来运行 HPO. 
+  tickers_for_hpo: ['000100.SZ', '000426.SZ', '000001.SZ']  # 指定一个股票子集来运行 HPO. 
+  models_for_hpo: ['lgbm', 'lstm']                          # 定义要进行 HPO 的模型列表
   
   # --- LGBM 专属 HPO 配置 ---
   lgbm_hpo_config:
@@ -294,3 +305,18 @@ stocks_to_process:
   - ticker: '300242.SZ'
     keyword: '佳云科技'
     industry_etf: '159939.SZ'   # 科技 / 互联网 ETF
+
+# --- 6. 可视化配置 ---
+visualization_settings:
+  # ICIR 对比图的颜色配置
+  palette:
+    lgbm: "#49b6ff"
+    lstm: "#ffa915"
+    FUSION: "#2ecc71"
+  
+  # ICIR 对比图的 Y 轴显示范围
+  icir_plot_ylim: [-2.0, 2.0]
+
+# --- 7. 应用层设定 ---
+application_settings:
+  prophet_target_ticker: '600519.SH'    # 用于单点预测的目标股票
