@@ -183,35 +183,57 @@ def run_training_for_ticker(
             meta_file = model_dir / f"{model_type}_meta_{timestamp}.json"
             with open(meta_file, 'w', encoding='utf-8') as f:
                 json.dump(final_artifacts['metadata'], f, indent=4)
-        else: # lgbm
-            joblib.dump(final_artifacts['models'], model_file)
+
+            if 'encoders' in final_artifacts:
+                encoders_file = model_dir / f"{model_type}_encoders_{timestamp}.pkl"
+                joblib.dump(final_artifacts['encoders'], encoders_file)
+                print(f"SUCCESS: {model_type.upper()} Encoders 已保存: {encoders_file.name}")
+
+        else: joblib.dump(final_artifacts['models'], model_file)    # lgbm
         
         print(f"SUCCESS: 新版本模型已保存: {model_file.name}")
         
         # 清理旧版本模型
         num_to_keep = config.get('global_settings', {}).get('num_model_versions_to_keep', 3)
-        all_model_versions = sorted(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
         
-        if len(all_model_versions) > num_to_keep:
-            versions_to_delete = all_model_versions[:-num_to_keep]
-            print(f"INFO: 发现 {len(versions_to_delete)} 个旧模型版本需要清理 (保留最新的 {num_to_keep} 个)。")
+        # 1. 只查找模型文件来确定版本
+        all_model_files = sorted(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
+        
+        if len(all_model_files) > num_to_keep:
+            # 2. 确定要删除的模型文件列表
+            files_to_delete = all_model_files[:-num_to_keep]
+            print(f"INFO: 发现 {len(files_to_delete)} 个旧模型版本需要清理 (保留最新的 {num_to_keep} 个)。")
             
-            for old_model_path in versions_to_delete:
-                old_timestamp = old_model_path.stem.split('_')[-1]
-                old_scaler_path = old_model_path.parent / f"{model_type}_scaler_{old_timestamp}.pkl"
-                
+            for old_model_file in files_to_delete:
                 try:
-                    old_model_path.unlink(missing_ok=True)
-                    print(f"  - SUCCESS: 已清理旧模型: {old_model_path.name}")
-                    old_scaler_path.unlink(missing_ok=True)
-                    print(f"  - SUCCESS: 已清理旧 Scaler: {old_scaler_path.name}")
+                    # 3. 从旧模型文件名中【精确提取】时间戳
+                    # 文件名格式: {model_type}_model_{timestamp}.suffix
+                    parts = old_model_file.stem.split('_')
+                    if len(parts) < 3: continue # 文件名格式不符，跳过
+                    old_timestamp = parts[-1]
+
+                    # 4. 根据时间戳构建所有关联构件的精确路径
+                    old_scaler_file = model_dir / f"{model_type}_scaler_{old_timestamp}.pkl"
+                    
+                    # 5. 安全地删除所有关联文件
+                    old_model_file.unlink(missing_ok=True)
+                    print(f"  - SUCCESS: 已清理旧模型: {old_model_file.name}")
+                    
+                    old_scaler_file.unlink(missing_ok=True)
+                    print(f"  - SUCCESS: 已清理旧 Scaler: {old_scaler_file.name}")
                     
                     if model_type in ['lstm', 'tabtransformer']:
-                        old_meta_path = old_model_path.parent / f"{model_type}_meta_{old_timestamp}.json"
-                        old_meta_path.unlink(missing_ok=True)
-                        print(f"  - SUCCESS: 已清理旧 Meta: {old_meta_path.name}")
+                        old_meta_file = model_dir / f"{model_type}_meta_{old_timestamp}.json"
+                        old_encoders_file = model_dir / f"{model_type}_encoders_{old_timestamp}.pkl"
+                        
+                        old_meta_file.unlink(missing_ok=True)
+                        print(f"  - SUCCESS: 已清理旧 Meta: {old_meta_file.name}")
+                        
+                        old_encoders_file.unlink(missing_ok=True)
+                        print(f"  - SUCCESS: 已清理旧 Encoders: {old_encoders_file.name}")
+
                 except Exception as e:
-                    print(f"  - ERROR: 清理失败: {old_model_path.name}, 原因: {e}")
+                    print(f"  - ERROR: 清理文件 {old_model_file.name} 及其关联构件时发生错误: {e}")
 
     # --- 最终清理 ---
     if progress_file.exists():

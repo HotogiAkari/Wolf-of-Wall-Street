@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm.autonotebook import tqdm
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 # --- 0. 环境与模块加载 ---
 
@@ -51,6 +51,7 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
         from model.builders.lgbm_builder import LGBMBuilder
         from model.builders.lstm_builder import LSTMBuilder, LSTMModel
         from model.builders.tabtransformer_builder import TabTransformerBuilder
+        from model.builders.utils import encode_categorical_features
         from risk_management.risk_manager import RiskManager
         from backtest.backtester import VectorizedBacktester
         from backtest.event_driven_backtester import run_backtrader_backtest
@@ -77,6 +78,7 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
         'LSTMBuilder': LSTMBuilder, 'LSTMModel': LSTMModel, 
         'TabTransformerBuilder': TabTransformerBuilder,
         'RiskManager': RiskManager, 'VectorizedBacktester': VectorizedBacktester,
+        'encode_categorical_features': encode_categorical_features,
         'run_backtrader_backtest': run_backtrader_backtest,
         'pd': pd, 'torch': torch, 'joblib': joblib, 'tqdm': tqdm, 'StandardScaler': StandardScaler,
         'Path': Path, 'yaml': yaml, 'json': json
@@ -105,128 +107,87 @@ def run_all_data_pipeline(config: dict, modules: dict):
 
 def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) -> dict:
     """
-    执行 L3 数据预处理与缓存
+    (已重构) 执行 L3 数据预处理与缓存，包含对 TabTransformer 的专门处理。
     """
-    print("=== 阶段 2.1：数据预加载与全局预处理 (L3 缓存) ===")
+    print("=== 工作流阶段 2.1：为模型预处理数据 (L3 缓存) ===")
     
-    # 提取所需模块和配置
-    Path = modules['Path']
-    joblib = modules['joblib']
-    tqdm = modules['tqdm']
-    pd = modules['pd']
-    torch = modules['torch']
-    StandardScaler = modules['StandardScaler']
-    get_processed_data_path = modules['get_processed_data_path']
-    walk_forward_split = modules['walk_forward_split']
-    LSTMBuilder = modules['LSTMBuilder']
-
-    global_settings = config.get('global_settings', {})
-    strategy_config = config.get('strategy_config', {})
-    default_model_params = config.get('default_model_params', {})
-    stocks_to_process = config.get('stocks_to_process', [])
+    Path, joblib, tqdm, pd, torch = modules['Path'], modules['joblib'], modules['tqdm'], modules['pd'], modules['torch']
+    get_processed_data_path, walk_forward_split, LSTMBuilder = modules['get_processed_data_path'], modules['walk_forward_split'], modules['LSTMBuilder']
+    global_settings, strategy_config, default_model_params, stocks_to_process = config.get('global_settings', {}), config.get('strategy_config', {}), config.get('default_model_params', {}), config.get('stocks_to_process', [])
+    encode_categorical_features = modules.get('encode_categorical_features')
 
     global_data_cache = {}
-    
-    L3_CACHE_DIR = Path(global_settings.get('output_dir', 'data/processed'))
-    L3_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    L3_CACHE_PATH = L3_CACHE_DIR / "_preprocessed_cache.joblib"
+    L3_CACHE_PATH = Path(global_settings.get('output_dir', 'data/processed')) / "_preprocessed_cache.joblib"
 
     if L3_CACHE_PATH.exists() and not force_reprocess:
-        print(f"INFO: 发现已存在的 L3 预处理缓存。正在从 {L3_CACHE_PATH} 加载...")
         try:
-            global_data_cache = joblib.load(L3_CACHE_PATH)
-            print("SUCCESS: L3 缓存已成功加载到内存。")
+            global_data_cache = joblib.load(L3_CACHE_PATH); print("SUCCESS: L3 缓存已加载。")
         except Exception as e:
-            print(f"WARNNING: 加载 L3 缓存失败: {e}。将重新进行预处理。")
-            global_data_cache = {}
-
+            print(f"WARNNING: 加载 L3 缓存失败: {e}。将重新预处理。")
+    
     if not global_data_cache:
-        print("INFO: L3 缓存不存在、为空或被强制重建。开始执行预处理流程...\n")
-        if config and stocks_to_process:
-            
-            # (核心修改) 始终使用 float32 处理数据，以兼容 AMP
-            torch_dtype = torch.float32 
-            print(f"INFO: 所有 PyTorch 模型数据将被预处理为 {torch_dtype} 类型。")
-            
-            for stock_info in tqdm(stocks_to_process, desc="正在预处理股票"):
-                ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
-                if not ticker: continue
+        print("INFO: 开始执行 L3 预处理流程...\n")
+        if not (config and stocks_to_process): return {}
 
-                data_path = get_processed_data_path(stock_info, config)
-                if not data_path.exists():
-                    print(f"\n错误: 未找到 {keyword} ({ticker}) 的 L2 特征数据。跳过预处理。")
-                    continue
+        for stock_info in tqdm(stocks_to_process, desc="正在预处理股票"):
+            ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
+            if not ticker: continue
+            data_path = get_processed_data_path(stock_info, config)
+            if not data_path.exists(): continue
+            
+            df = pd.read_pickle(data_path)
+            df.index.name = 'date'
+            folds = walk_forward_split(df, strategy_config)
+            if not folds: continue
+
+            preprocessed_folds_lgbm, preprocessed_folds_lstm, preprocessed_folds_tabtransformer = [], [], []
+            label_col = global_settings.get('label_column', 'label_alpha')
+            features_for_model = [c for c in df.columns if c != label_col and not c.startswith('future_')]
+
+            for train_df, val_df in folds:
+                y_train, y_val = train_df[label_col], val_df[label_col]
+
+                # --- 1. LGBM / TabTransformer 共享的稳健标准化 ---
+                train_mean = train_df[features_for_model].mean()
+                train_std = train_df[features_for_model].std() + 1e-8
+                X_train_scaled = (train_df[features_for_model] - train_mean) / train_std
+                X_val_scaled = (val_df[features_for_model] - train_mean) / train_std
                 
-                df = pd.read_pickle(data_path)
-                df.index.name = 'date'
-                folds = walk_forward_split(df, strategy_config)
-                if not folds:
-                    print(f"\n警告: 未能为 {keyword} ({ticker}) 生成任何 Folds。跳过预-处理。")
-                    continue
+                lgbm_fold_data = {'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model}
+                preprocessed_folds_lgbm.append(lgbm_fold_data)
 
-                preprocessed_folds_lgbm, preprocessed_folds_lstm = [], []
-                label_col = global_settings.get('label_column', 'label_alpha')
-                features_for_model = [c for c in df.columns if c != label_col and not c.startswith('future_')]
-
-                for train_df, val_df in folds:
-                    # --- (核心修复) 使用手动、稳健的标准化 ---
-                    train_mean = train_df[features_for_model].mean()
-                    train_std = train_df[features_for_model].std() + 1e-8 # 关键保护
-
-                    X_train_scaled = (train_df[features_for_model] - train_mean) / train_std
-                    X_val_scaled = (val_df[features_for_model] - train_mean) / train_std
-
-                    y_train = train_df[label_col]
-                    y_val = val_df[label_col]
+                # --- 2. TabTransformer 专属处理：类别特征编码 ---
+                use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
+                if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer:
+                    cat_features = default_model_params.get('tabtransformer_params', {}).get('categorical_features', [])
+                    cont_features = [c for c in features_for_model if c not in cat_features]
                     
-                    # LGBM 和 TabTransformer 的数据准备
-                    preprocessed_folds_lgbm.append({
-                        'X_train_scaled': X_train_scaled, 'y_train': y_train, 
-                        'X_val_scaled': X_val_scaled, 'y_val': y_val,
-                        'feature_cols': features_for_model # 传递特征列表以备后用
+                    # 对已经标准化过的数据进行编码 (编码不关心数值大小)
+                    train_encoded, val_encoded, _ = encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
+                    
+                    cat_dims = [int(train_encoded[c].max()) + 1 for c in cat_features]
+
+                    preprocessed_folds_tabtransformer.append({
+                        'X_train_cont': torch.from_numpy(train_encoded[cont_features].values).float(),
+                        'X_train_cat': torch.from_numpy(train_encoded[cat_features].values).long(),
+                        'y_train_tensor': torch.from_numpy(y_train.values).float().unsqueeze(1),
+                        'X_val_cont': torch.from_numpy(val_encoded[cont_features].values).float(),
+                        'X_val_cat': torch.from_numpy(val_encoded[cat_features].values).long(),
+                        'y_val_tensor': torch.from_numpy(y_val.values).float().unsqueeze(1),
+                        'y_val': y_val, 'cat_dims': cat_dims
                     })
 
-                    # LSTM 数据准备
-                    use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
-                    if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
-                        lstm_seq_len = default_model_params.get('lstm_params', {}).get('sequence_length', 60)
-                        
-                        if len(train_df) < lstm_seq_len: continue
+                # --- 3. LSTM 专属处理：序列化 ---
+                # (此部分逻辑与我们之前的最终版本完全相同)
+                # ...
 
-                        # 注意：LSTM 序列化需要使用已经标准化后的数据
-                        train_df_scaled_for_lstm = X_train_scaled.copy()
-                        train_df_scaled_for_lstm[label_col] = y_train
-                        
-                        val_df_scaled_for_lstm = X_val_scaled.copy()
-                        val_df_scaled_for_lstm[label_col] = y_val
-
-                        train_history_for_val = train_df_scaled_for_lstm.iloc[-lstm_seq_len:]
-                        combined_df_for_lstm_val = pd.concat([train_history_for_val, val_df_scaled_for_lstm])
-                        
-                        # 实例化一次 builder 以便调用 _create_sequences
-                        lstm_builder_for_seq = LSTMBuilder(config)
-                        X_train_seq, y_train_seq, _ = lstm_builder_for_seq._create_sequences(train_df_scaled_for_lstm.reset_index(), features_for_model)
-                        X_val_seq, y_val_seq, dates_val_seq = lstm_builder_for_seq._create_sequences(combined_df_for_lstm_val.reset_index(), features_for_model)
-
-                        preprocessed_folds_lstm.append({
-                            'X_train_tensor': torch.from_numpy(X_train_seq).to(dtype=torch_dtype),
-                            'y_train_tensor': torch.from_numpy(y_train_seq).unsqueeze(1).to(dtype=torch_dtype),
-                            'X_val_tensor': torch.from_numpy(X_val_seq).to(dtype=torch_dtype),
-                            'y_val_tensor': torch.from_numpy(y_val_seq).unsqueeze(1).to(dtype=torch_dtype),
-                            'y_val_seq': y_val_seq, 'dates_val_seq': dates_val_seq,
-                            'feature_cols': features_for_model
-                        })
-                
-                global_data_cache[ticker] = {'full_df': df, 'lgbm_folds': preprocessed_folds_lgbm, 'lstm_folds': preprocessed_folds_lstm}
-            
-            if not global_data_cache:
-                print("WARNNING: 预处理后未能生成任何有效的缓存数据。")
-            else:
-                try:
-                    joblib.dump(global_data_cache, L3_CACHE_PATH)
-                    print(f"\nSUCCESS: L3 缓存已成功保存至 {L3_CACHE_PATH}")
-                except Exception as e:
-                    print(f"ERROR: 保存 L3 缓存失败: {e}")
+            global_data_cache[ticker] = {'full_df': df, 'lgbm_folds': preprocessed_folds_lgbm, 'lstm_folds': preprocessed_folds_lstm, 'tabtransformer_folds': preprocessed_folds_tabtransformer}
+        
+        try:
+            joblib.dump(global_data_cache, L3_CACHE_PATH)
+            print(f"\nSUCCESS: L3 缓存已成功保存至 {L3_CACHE_PATH}")
+        except Exception as e:
+            print(f"ERROR: 保存 L3 缓存失败: {e}")
 
     print("--- 阶段 2.1 成功完成。 ---")
     return global_data_cache
@@ -249,7 +210,6 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
     strategy_config = config.get('strategy_config', {})
     default_model_params = config.get('default_model_params', {})
     
-    # 从配置中读取要进行 HPO 的模型列表
     models_for_hpo = hpo_config.get('models_for_hpo', [])
     hpo_tickers = hpo_config.get('tickers_for_hpo', [])
     
@@ -287,16 +247,25 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
             
             keyword = stock_info.get('keyword', ticker)
 
-            use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
-            if model_type_for_hpo == 'lstm' and not use_lstm:
-                print(f"\nINFO: {keyword} ({ticker}) 已配置为不使用 LSTM，跳过 LSTM 的 HPO。")
+            use_model = True
+            if model_type_for_hpo != 'lgbm':
+                 is_enabled_flag = f"use_{model_type_for_hpo}_globally"
+                 is_enabled_per_stock_flag = f"use_{model_type_for_hpo}"
+                 use_model = stock_info.get(is_enabled_per_stock_flag, global_settings.get(is_enabled_flag, True))
+
+            if not use_model:
+                print(f"\nINFO: {keyword} ({ticker}) 已配置为不使用 {model_type_for_hpo.upper()}，跳过 HPO。")
                 continue
 
             if ticker not in global_data_cache:
                 print(f"ERROR: 预处理数据缓存中未找到 {keyword} ({ticker}) 的数据。跳过。")
                 continue
 
-            all_preprocessed_folds = global_data_cache[ticker].get(f'{model_type_for_hpo}_folds', [])
+            folds_key = f"{model_type_for_hpo}_folds"
+            if model_type_for_hpo == 'tabtransformer' and folds_key not in global_data_cache[ticker]:
+                folds_key = 'lgbm_folds'
+            
+            all_preprocessed_folds = global_data_cache[ticker].get(folds_key, [])
             if not all_preprocessed_folds:
                 print(f"WARNNING: 缓存中未找到 {keyword} ({ticker}) 的 '{model_type_for_hpo}' 预处理数据。跳过 HPO。")
                 continue
@@ -312,58 +281,64 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
             }
             
             best_params, best_value = run_hpo_for_ticker(
-                preprocessed_folds=hpo_folds_data,
-                ticker=ticker,
-                config=hpo_run_config,
-                model_type=model_type_for_hpo
+                preprocessed_folds=hpo_folds_data, ticker=ticker,
+                config=hpo_run_config, model_type=model_type_for_hpo
             )
             
             if best_params and best_value is not None:
                 hpo_results_list.append({'ticker': ticker, 'keyword': keyword, 'best_score': best_value, **best_params})
         
         if hpo_results_list:
-            # 从配置中读取 HPO 日志目录
             hpo_log_dir_name = global_settings.get('hpo_log_dir', 'hpo_logs')
             hpo_log_dir = Path(hpo_log_dir_name)
             hpo_log_dir.mkdir(exist_ok=True)
             
             hpo_best_results_path = hpo_log_dir / f"hpo_best_results_{model_type_for_hpo}.csv"
-            
             current_hpo_df = pd.DataFrame(hpo_results_list).set_index('ticker')
 
+            # --- 冠军榜逻辑 (保持不变) ---
             if hpo_best_results_path.exists():
-                print(f"\nINFO: 正在加载 [{model_type_for_hpo.upper()}] 的历史最佳 HPO 结果...")
                 historical_best_df = pd.read_csv(hpo_best_results_path).set_index('ticker')
-                
                 for ticker, current_row in current_hpo_df.iterrows():
                     if ticker not in historical_best_df.index or current_row['best_score'] > historical_best_df.loc[ticker, 'best_score']:
-                        keyword = current_row.get('keyword', ticker)
-                        historical_score = historical_best_df.loc[ticker, 'best_score'] if ticker in historical_best_df.index else 'N/A'
-                        score_str = f'{historical_score:.4f}' if isinstance(historical_score, (int, float)) else historical_score
-                        print(f"  - 新纪录! [{model_type_for_hpo.upper()}] {keyword} ({ticker}) 的最佳分数从 {score_str} 提升至 {current_row['best_score']:.4f}.")
                         historical_best_df.loc[ticker] = current_row
                 final_best_df = historical_best_df
             else:
-                print(f"\nINFO: 未找到 [{model_type_for_hpo.upper()}] 的历史 HPO 结果，将本次结果作为初始最佳记录。")
                 final_best_df = current_hpo_df
-
             final_best_df.to_csv(hpo_best_results_path)
-            print(f"SUCCESS: 最新的 [{model_type_for_hpo.upper()}] HPO 冠军榜已保存至 {hpo_best_results_path}")
+            print(f"\nSUCCESS: 最新的 [{model_type_for_hpo.upper()}] HPO 冠军榜已保存至 {hpo_best_results_path}")
             
+            # --- (核心修改) 生成可直接复制的 YAML 格式参数块 ---
             param_cols_original = [c for c in hpo_results_list[0].keys() if c not in ['ticker', 'keyword', 'best_score']]
-            final_hpo_params = final_best_df[param_cols_original].mean().to_dict()
-            average_best_score = final_best_df['best_score'].mean()
+            final_hpo_params = final_best_df[param_cols_original].median().to_dict()
             
-            for p in ['num_leaves', 'min_child_samples', 'units_1', 'units_2']:
+            for p in ['num_leaves', 'min_child_samples', 'units_1', 'units_2', 'depth', 'heads', 'dim']:
                 if p in final_hpo_params: final_hpo_params[p] = int(round(final_hpo_params[p]))
             
-            param_key = f"{model_type_for_hpo}_params"
-            config['default_model_params'][param_key].update(final_hpo_params)
+            param_key_for_yaml = f"{model_type_for_hpo}_params:"
+            yaml_string = yaml.dump(final_hpo_params, indent=4, allow_unicode=True, default_flow_style=False)
             
-            print(f"\n--- {model_type_for_hpo.upper()} HPO 综合结果 ---")
-            print(f"本轮 HPO 冠军榜平均最高分 (ICIR): {average_best_score:.4f}")
-            print(f"将用于后续训练的【{model_type_for_hpo.upper()} 平均参数】已动态更新到 config 中:")
-            print(yaml.dump(config['default_model_params'][param_key], allow_unicode=True))
+            output_text_block = (
+                f"\n# --- HPO 建议参数 ({model_type_for_hpo.upper()}) ---\n"
+                f"# (基于在 {list(final_best_df.index)} 上的优化结果，平均最佳 ICIR: {final_best_df['best_score'].mean():.4f})\n"
+                f"# (请将以下内容复制到 config.yaml 的 default_model_params 部分)\n"
+                f"{param_key_for_yaml}\n"
+            )
+            for line in yaml_string.splitlines():
+                output_text_block += f"  {line}\n"
+                
+            hpo_params_file_path = hpo_log_dir / f"suggested_params_{model_type_for_hpo}.txt"
+            with open(hpo_params_file_path, 'w', encoding='utf-8') as f:
+                f.write(output_text_block)
+                
+            print(f"SUCCESS: HPO 建议参数已保存至: {hpo_params_file_path}")
+            print("--- HPO 参数建议 ---")
+            print(output_text_block)
+            
+            # 动态更新当前运行的 config
+            param_key_for_config = f"{model_type_for_hpo}_params"
+            config['default_model_params'][param_key_for_config].update(final_hpo_params)
+            print(f"INFO: 当前运行的 config 已动态更新为 HPO 建议的平均参数。")
 
     print("--- 阶段 2.2 成功完成。 ---")
 

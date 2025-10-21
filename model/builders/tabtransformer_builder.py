@@ -9,6 +9,7 @@ from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from model.builders.utils import encode_categorical_features
 
 class TabTransformerModel(nn.Module):
     """
@@ -102,33 +103,34 @@ class TabTransformerBuilder:
         if not cached_data:
             raise ValueError("'cached_data' is required for this method.")
 
-        X_train, y_train = cached_data['X_train_scaled'], cached_data['y_train']
-        X_val, y_val = cached_data['X_val_scaled'], cached_data['y_val']
-
-        if X_train.empty or X_val.empty:
-            return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
-
-        X_train_cont, X_train_cat, y_train_tensor = self._prepare_data_tensors(X_train, y_train)
-        X_val_cont, X_val_cat, y_val_tensor = self._prepare_data_tensors(X_val, y_val)
+        # --- 1. 直接从缓存加载预处理好的 Tensors ---
+        X_train_cont, X_train_cat, y_train_tensor = cached_data['X_train_cont'], cached_data['X_train_cat'], cached_data['y_train_tensor']
+        X_val_cont, X_val_cat, y_val_tensor = cached_data['X_val_cont'], cached_data['X_val_cat'], cached_data['y_val_tensor']
+        y_val = cached_data['y_val']
+        cat_dims = cached_data['cat_dims']
         
-        cat_features = self.model_params.get('categorical_features', ['day_of_week', 'month'])
-        cat_dims = [int(X_train[col].max()) + 1 for col in cat_features]
-        cont_features = [c for c in X_train.columns if c not in cat_features]
-
+        if X_train_cont.shape[0] == 0:
+            return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
+        
+        # --- 2. 初始化模型、损失函数、优化器 ---
         model = TabTransformerModel(
-            num_continuous=len(cont_features), cat_dims=cat_dims,
-            dim=self.model_params.get('dim', 32), depth=self.model_params.get('depth', 4),
-            heads=self.model_params.get('heads', 4), attn_dropout=self.model_params.get('dropout', 0.1),
+            num_continuous=X_train_cont.shape[1],
+            cat_dims=cat_dims,
+            dim=self.model_params.get('dim', 32),
+            depth=self.model_params.get('depth', 4),
+            heads=self.model_params.get('heads', 4),
+            attn_dropout=self.model_params.get('dropout', 0.1),
             ff_dropout=self.model_params.get('dropout', 0.1)
         ).to(self.device)
-
+        
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=self.model_params.get('learning_rate', 0.001))
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
 
         train_dataset = TensorDataset(X_train_cont, X_train_cat, y_train_tensor)
-        train_loader = DataLoader(train_dataset, batch_size=self.model_params.get('batch_size', 128), shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=self.model_params.get('batch_size', 256), shuffle=True)
         
+        # --- 3. 执行训练循环 ---
         best_val_loss, patience_counter, best_model_state = float('inf'), 0, None
         patience = self.model_params.get('early_stopping_rounds', 20)
         epochs = self.model_params.get('epochs', 100)
@@ -150,7 +152,7 @@ class TabTransformerBuilder:
                 val_outputs = model(X_val_cont.to(self.device), X_val_cat.to(self.device))
                 val_loss = criterion(val_outputs, y_val_tensor.to(self.device))
             
-            scheduler.step(val_loss)
+            scheduler.step(val_loss.item())
             
             if val_loss.item() < best_val_loss:
                 best_val_loss = val_loss.item()
@@ -162,8 +164,10 @@ class TabTransformerBuilder:
             if self.verbose and (epoch + 1) % self.verbose_period == 0:
                 epoch_iterator.set_postfix(best_val_loss=f"{best_val_loss:.6f}")
             if patience_counter >= patience:
+                if self.verbose: tqdm.write(f"    - INFO: 早停机制已在第 {epoch + 1} 轮触发。")
                 break
         
+        # --- 4. 处理并返回结果 ---
         ic_df, oof_df, fold_stats = pd.DataFrame(), pd.DataFrame(), {}
         if best_model_state:
             model.load_state_dict(best_model_state)
@@ -182,7 +186,7 @@ class TabTransformerBuilder:
             
             fold_stats['best_loss'] = f"{best_val_loss:.6f}"
 
-        metadata = {'input_size_cont': len(cont_features), 'input_size_cat': len(cat_features), 'cat_dims': cat_dims, 'feature_cols': X_train.columns.tolist()}
+        metadata = {'cat_dims': cat_dims} # 保存 cat_dims 以备后用
         
         del model, train_loader, train_dataset
         gc.collect()
@@ -191,25 +195,42 @@ class TabTransformerBuilder:
         return {'model_state_dict': best_model_state, 'metadata': metadata}, ic_df, oof_df, fold_stats
 
     def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
-        label_col = self.label_col
-        features = [col for col in full_df.columns if col != label_col and not col.startswith('future_')]
-        
-        X_full, y_full = full_df[features], full_df[label_col]
-        
-        final_scaler = StandardScaler()
-        X_full_scaled = X_full.copy()
-        X_full_scaled[:] = final_scaler.fit_transform(X_full)
+        """
+        (已修复) 在全部数据上训练最终的生产模型。
+        """
+        print(f"    - INFO: Starting final TabTransformer model training...")
 
-        X_full_cont, X_full_cat, y_full_tensor = self._prepare_data_tensors(X_full_scaled, y_full)
+        # --- 1. 特征和标签分离 ---
+        features = [col for col in full_df.columns if col != self.label_col and not col.startswith('future_')]
+        X_full, y_full = full_df[features], full_df[self.label_col]
         
         cat_features = self.model_params.get('categorical_features', ['day_of_week', 'month'])
-        cat_dims = [int(X_full[col].max()) + 1 for col in cat_features]
         cont_features = [c for c in X_full.columns if c not in cat_features]
 
+        # --- 2. (核心修复) 类别特征编码 ---
+        # 我们需要一个虚拟的 df_val 来满足 _encode_categorical_features 的接口
+        X_full_encoded, _, encoders = encode_categorical_features(X_full.copy(), X_full.head(1).copy(), cat_features)
+        
+        # --- 3. (核心修复) 只对连续特征进行标准化 ---
+        final_scaler = StandardScaler()
+        # fit_transform 只在连续特征上进行
+        X_full_encoded[cont_features] = final_scaler.fit_transform(X_full_encoded[cont_features])
+
+        # --- 4. 准备 Tensors ---
+        X_full_cont, X_full_cat, y_full_tensor = self._prepare_data_tensors(X_full_encoded, y_full)
+        
+        # --- 5. (核心修复) 正确计算 cat_dims ---
+        # 从编码后的数据中获取正确的类别数量
+        cat_dims = [len(encoders[col].classes_) for col in cat_features]
+
+        # --- 6. 模型训练 (与之前类似) ---
         model = TabTransformerModel(
-            num_continuous=len(cont_features), cat_dims=cat_dims,
-            dim=self.model_params.get('dim', 32), depth=self.model_params.get('depth', 4),
-            heads=self.model_params.get('heads', 4), attn_dropout=self.model_params.get('dropout', 0.1),
+            num_continuous=len(cont_features),
+            cat_dims=cat_dims, # <-- 使用正确的 cat_dims
+            dim=self.model_params.get('dim', 32),
+            depth=self.model_params.get('depth', 4),
+            heads=self.model_params.get('heads', 4),
+            attn_dropout=self.model_params.get('dropout', 0.1),
             ff_dropout=self.model_params.get('dropout', 0.1)
         ).to(self.device)
 
@@ -217,9 +238,9 @@ class TabTransformerBuilder:
         optimizer = torch.optim.Adam(model.parameters(), lr=self.model_params.get('learning_rate', 0.001))
         
         train_dataset = TensorDataset(X_full_cont, X_full_cat, y_full_tensor)
-        train_loader = DataLoader(train_dataset, batch_size=self.model_params.get('batch_size', 128), shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=self.model_params.get('batch_size', 256), shuffle=True)
         
-        final_epochs = self.model_params.get('final_model_epochs', self.model_params.get('epochs', 100) // 2)
+        final_epochs = self.model_params.get('final_model_epochs', 50)
         
         model.train()
         for epoch in range(final_epochs):
@@ -230,7 +251,14 @@ class TabTransformerBuilder:
                 loss = criterion(outputs, y_batch)
                 loss.backward()
                 optimizer.step()
+        
+        print("    - SUCCESS: Final TabTransformer model training complete.")
+        
+        metadata = {
+            'cat_dims': cat_dims, 
+            'feature_cols': features,
+            'cat_features': cat_features,
+            'cont_features': cont_features
+        }
 
-        metadata = {'input_size_cont': len(cont_features), 'input_size_cat': len(cat_features), 'cat_dims': cat_dims, 'feature_cols': features}
-
-        return {'model': model, 'scaler': final_scaler, 'metadata': metadata}
+        return {'model': model, 'scaler': final_scaler, 'metadata': metadata, 'encoders': encoders}
