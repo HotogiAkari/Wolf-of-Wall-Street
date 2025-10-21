@@ -13,8 +13,7 @@ import torch.nn as nn
 from tqdm.autonotebook import tqdm
 from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import LinearLR, ReduceLROnPlateau
 
 class LSTMModel(nn.Module):
     """定义 PyTorch LSTM 模型结构。"""
@@ -82,32 +81,23 @@ class LSTMBuilder:
         if not cached_data:
             raise ValueError("'cached_data' is required for this method.")
 
-        X_train_tensor = cached_data['X_train_tensor']
-        y_train_tensor = cached_data['y_train_tensor']
-        X_val_tensor = cached_data['X_val_tensor']
-        y_val_tensor = cached_data['y_val_tensor']
-        y_val_seq = cached_data['y_val_seq']
-        dates_val_seq = cached_data['dates_val_seq']
+        X_train_tensor, y_train_tensor = cached_data['X_train_tensor'], cached_data['y_train_tensor']
+        X_val_tensor, y_val_tensor = cached_data['X_val_tensor'], cached_data['y_val_tensor']
+        y_val_seq, dates_val_seq = cached_data['y_val_seq'], cached_data['dates_val_seq']
 
         if X_train_tensor.shape[0] == 0 or X_val_tensor.shape[0] == 0:
             return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
         
-        # --- 诊断步骤 ---
-        if not torch.all(torch.isfinite(X_train_tensor)):
-            print("FATAL: 训练数据 X_train_tensor 中包含 inf/nan！跳过此 fold。")
-            return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
-        if not torch.all(torch.isfinite(y_train_tensor)):
-            print("FATAL: 训练标签 y_train_tensor 中包含 inf/nan！跳过此 fold。")
+        if not torch.all(torch.isfinite(X_train_tensor)) or not torch.all(torch.isfinite(y_train_tensor)):
+            print("FATAL: 训练数据或标签中包含 inf/nan！跳过此 fold。")
             return {'model_state_dict': None, 'metadata': {}}, pd.DataFrame(), pd.DataFrame(), {}
 
         p = self.lstm_params
-        batch_size = p.get('batch_size', 128)
-        num_workers = p.get('num_workers', 0)
         
         train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True,
-            num_workers=num_workers, pin_memory=(self.device=='cuda'), drop_last=True
+            train_dataset, batch_size=p.get('batch_size', 128), shuffle=True,
+            num_workers=p.get('num_workers', 0), pin_memory=(self.device=='cuda'), drop_last=True
         )
         
         model = LSTMModel(
@@ -116,18 +106,25 @@ class LSTMBuilder:
             hidden_size_2=p.get('units_2', 32),
             dropout=p.get('dropout', 0.2)
         ).to(self.device)
-
+        
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
-        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
         
-        # (核心修复) use_amp 的定义现在更简单
+        # --- (核心修改) 手动实现 ChainedScheduler 逻辑 ---
+        warmup_steps = p.get('warmup_steps', 5)
+        warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_steps)
+        plateau_scheduler = ReduceLROnPlateau(
+            optimizer, mode='min', 
+            patience=p.get('plateau_patience', 15),
+            factor=p.get('plateau_factor', 0.5),
+        )
+        
         use_amp = (p.get('precision', 32) == 16) and (self.device == 'cuda')
-        scaler_amp = torch.cuda.amp.GradScaler(enabled=use_amp)
+        scaler_amp = torch.amp.GradScaler(enabled=use_amp)
 
         best_val_loss, patience_counter, best_model_state = float('inf'), 0, None
-        patience = p.get('early_stopping_rounds_lstm', 50)
-        epochs = p.get('epochs', 100)
+        patience = p.get('early_stopping_rounds_lstm', 25)
+        epochs = p.get('epochs', 150)
         
         epoch_iterator = tqdm(range(epochs), desc="    - Epochs (LSTM)", leave=False, disable=not self.verbose)
         
@@ -137,7 +134,7 @@ class LSTMBuilder:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 optimizer.zero_grad(set_to_none=True)
                 
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
                     outputs = model(X_batch)
                     loss = criterion(outputs, y_batch)
                 
@@ -148,12 +145,12 @@ class LSTMBuilder:
 
                 if use_amp:
                     scaler_amp.scale(loss).backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # 梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     scaler_amp.step(optimizer)
                     scaler_amp.update()
                 else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # 梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
 
             if patience_counter >= patience:
@@ -161,14 +158,18 @@ class LSTMBuilder:
 
             model.eval()
             with torch.no_grad():
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
                     val_outputs = model(X_val_tensor.to(self.device))
                     val_loss = criterion(val_outputs, y_val_tensor.to(self.device))
                 
                 if not torch.isfinite(val_loss):
                     print(f"FATAL: Epoch {epoch}, 验证损失变为 {val_loss.item()}！")
             
-            scheduler.step(val_loss.item())
+            # --- (核心修改) 手动管理学习率调度 ---
+            if epoch < warmup_steps:
+                warmup_scheduler.step()
+            else:
+                plateau_scheduler.step(val_loss.item())
             
             if val_loss.item() < best_val_loss:
                 best_val_loss = val_loss.item()
@@ -178,7 +179,8 @@ class LSTMBuilder:
                 patience_counter += 1
             
             if self.verbose and (epoch + 1) % self.verbose_period == 0:
-                epoch_iterator.set_postfix(best_val_loss=f"{best_val_loss:.6f}")
+                current_lr = optimizer.param_groups[0]['lr']
+                epoch_iterator.set_postfix(best_val_loss=f"{best_val_loss:.6f}", lr=f"{current_lr:.1e}")
 
             if patience_counter >= patience:
                 if self.verbose: tqdm.write(f"    - INFO: 早停机制已在第 {epoch + 1} 轮触发。")
@@ -197,7 +199,7 @@ class LSTMBuilder:
             model.load_state_dict(best_model_state)
             model.eval()
             with torch.no_grad():
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast(device_type=self.device, dtype=torch.float16, enabled=use_amp):
                     preds = model(X_val_tensor.to(self.device)).cpu().numpy().flatten()
             
             eval_df = pd.DataFrame({'y_pred': preds, 'y_true': y_val_seq, 'date': pd.to_datetime(dates_val_seq)})
@@ -214,3 +216,63 @@ class LSTMBuilder:
         if self.device == 'cuda': torch.cuda.empty_cache()
             
         return {'model_state_dict': best_model_state, 'metadata': metadata}, ic_df, oof_df, fold_stats
+    
+    def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        在全部数据上训练最终的生产模型。
+        """
+        print(f"    - INFO: Starting final LSTM model training on all data...")
+        
+        features = [col for col in full_df.columns if col != self.label_col and not col.startswith('future_')]
+        
+        # 使用与 L3 缓存一致的手动、稳健标准化
+        final_mean = full_df[features].mean()
+        final_std = full_df[features].std() + 1e-8
+        
+        final_scaler = StandardScaler()
+        final_scaler.mean_ = final_mean.values
+        final_scaler.scale_ = final_std.values
+        
+        full_df_scaled = full_df.copy()
+        full_df_scaled[features] = (full_df[features] - final_mean) / final_std
+
+        X_full, y_full, _ = self._create_sequences(full_df_scaled.reset_index(), features)
+        if len(X_full) == 0:
+            raise ValueError("无法为最终模型创建任何数据序列。")
+
+        p = self.lstm_params
+        
+        train_dataset = torch.utils.data.TensorDataset(
+            torch.from_numpy(X_full).float(), 
+            torch.from_numpy(y_full).float().unsqueeze(1)
+        )
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=p.get('batch_size', 128), shuffle=True)
+        
+        model = LSTMModel(
+            input_size=X_full.shape[2], hidden_size_1=p.get('units_1', 64),
+            hidden_size_2=p.get('units_2', 32), dropout=p.get('dropout', 0.2)
+        ).to(self.device)
+        
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=p.get('learning_rate', 0.001))
+        
+        final_epochs = p.get('final_model_epochs', max(1, p.get('epochs', 100) // 2))
+        if self.verbose:
+            print(f"    - INFO: Training final model for a fixed {final_epochs} epochs.")
+            
+        final_epoch_iterator = tqdm(range(final_epochs), desc="    - Final Epochs", leave=False, disable=not self.verbose)
+
+        model.train()
+        for epoch in final_epoch_iterator:
+            for X_batch, y_batch in train_loader:
+                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
+                optimizer.zero_grad(set_to_none=True)
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+        metadata = {'input_size': X_full.shape[2], 'feature_cols': features}
+
+        return {'model': model, 'scaler': final_scaler, 'metadata': metadata}

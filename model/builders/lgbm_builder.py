@@ -62,7 +62,6 @@ class LGBMBuilder:
             
             early_stopping_rounds = self.lgbm_params.get('early_stopping_rounds', 100)
             
-            # --- 核心修正 1：将警告抑制的范围扩大 ---
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore") # 忽略此 with 块内发出的所有警告
                 

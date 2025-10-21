@@ -55,7 +55,7 @@ def run_training_for_ticker(
     keyword: str = None
 ) -> Optional[pd.DataFrame]:
     """
-    为单个模型执行完整的滚动训练，并支持断点续训功能。
+    (已修复) 为单个模型执行完整的滚动训练，并支持最终模型训练的断点续训。
     """
     display_name = keyword if keyword else ticker
     print(f"--- 开始为 {display_name} ({ticker}) 进行 {model_type.upper()} 模型训练 ---")
@@ -63,13 +63,16 @@ def run_training_for_ticker(
     model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / ticker
     model_dir.mkdir(parents=True, exist_ok=True)
     
-    file_suffixes = {'lgbm': '.pkl', 'lstm': '.pt'}
+    file_suffixes = {'lgbm': '.pkl', 'lstm': '.pt', 'tabtransformer': '.pt'}
     model_suffix = file_suffixes.get(model_type, '.pkl')
     
     ic_history_path = model_dir / f"{model_type}_ic_history.csv"
     oof_path = model_dir / f"{model_type}_oof_preds.csv"
-    progress_file = model_dir / f"_in_progress_{model_type}.json" # 遥测/进度文件
+    progress_file = model_dir / f"_in_progress_{model_type}.json"
     
+    start_fold_idx = 0
+    final_model_pending = False
+
     # 1: 强制重训
     if force_retrain:
         print("INFO: 强制重训已开启，将删除所有旧的构件...")
@@ -77,7 +80,6 @@ def run_training_for_ticker(
             if f.exists(): f.unlink()
         model_files = list(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
         for f in model_files: f.unlink()
-        start_fold_idx = 0
 
     # 2: 断点续训
     elif progress_file.exists():
@@ -85,8 +87,14 @@ def run_training_for_ticker(
         try:
             with open(progress_file, 'r') as f:
                 progress_data = json.load(f)
-            start_fold_idx = progress_data.get('completed_folds', 0)
-            print(f"SUCCESS: 成功从第 {start_fold_idx + 1} 个 fold 开始续训。")
+            
+            if progress_data.get('status') == 'final_model_pending':
+                final_model_pending = True
+                start_fold_idx = len(preprocessed_folds) if preprocessed_folds else 0
+                print("SUCCESS: 滚动训练已完成，直接进入最终模型训练阶段。")
+            else:
+                start_fold_idx = progress_data.get('completed_folds', 0)
+                print(f"SUCCESS: 成功从第 {start_fold_idx + 1} 个 fold 开始续训。")
         except Exception as e:
             print(f"WARNNING: 读取进度文件失败: {e}。将从头开始训练。")
             start_fold_idx = 0
@@ -94,66 +102,71 @@ def run_training_for_ticker(
     # 3: 完全跳过
     elif ic_history_path.exists() and list(model_dir.glob(f"{model_type}_model_*{model_suffix}")):
         print(f"INFO: 检测到已存在的完整训练结果。跳过训练。")
-        # 直接加载并返回完整的 IC 历史记录
-        return pd.read_csv(ic_history_path)
+        try:
+            return pd.read_csv(ic_history_path)
+        except Exception as e:
+            print(f"WARNNING: 读取历史 IC 文件失败: {e}。将继续执行。")
+            return None # 或者返回一个空 DataFrame
     
     # 4: 全新开始
     else:
         print("INFO: 未检测到现有进度或完整模型，将从头开始全新训练。")
-        start_fold_idx = 0
 
-    builder_map = {'lgbm': LGBMBuilder, 
-                   'lstm': LSTMBuilder,
-                   'tabtransformer': TabTransformerBuilder
-                   }
-    builder = builder_map[model_type](config)
+    # 动态导入 Builder
+    try:
+        from model.builders.lgbm_builder import LGBMBuilder
+        from model.builders.lstm_builder import LSTMBuilder
+        from model.builders.tabtransformer_builder import TabTransformerBuilder
+        builder_map = {'lgbm': LGBMBuilder, 'lstm': LSTMBuilder, 'tabtransformer': TabTransformerBuilder}
+        builder = builder_map[model_type](config)
+    except ImportError as e: print(f'ERROR: 导入模型时出现错误: {e}')
     
-    if not preprocessed_folds:
-        print(f"WARNNING: 未提供预处理 folds。跳过验证。")
-    else:
-        # 只有在需要进行训练时才打印
-        if start_fold_idx < len(preprocessed_folds):
-            print(f"INFO: 开始对 {display_name} 进行跨 {len(preprocessed_folds)} folds 的前向验证...")
-        
-            # 在全新训练开始前，创建遥测文件
-            if start_fold_idx == 0:
-                 with open(progress_file, 'w') as f: json.dump({'completed_folds': 0}, f)
+    # --- 滚动训练 ---
+    if not final_model_pending:
+        if preprocessed_folds:
+            if start_fold_idx < len(preprocessed_folds):
+                print(f"INFO: 开始对 {display_name} ({ticker}) 进行跨 {len(preprocessed_folds)} folds 的前向验证...")
+                if start_fold_idx == 0 and not progress_file.exists():
+                     with open(progress_file, 'w') as f: json.dump({'completed_folds': 0, 'status': 'in_progress'}, f)
 
-            fold_iterator = tqdm(
-                enumerate(preprocessed_folds), 
-                desc=f"正在 {display_name} 上训练 {model_type.upper()}",
-                total=len(preprocessed_folds),
-                initial=start_fold_idx, # 让进度条从断点开始
-                leave=True
-            )
-            
-            for i, fold_data in fold_iterator:
-                if i < start_fold_idx: continue # 快速跳过已完成的 folds
-                
-                _, ic_series_fold, oof_fold_df, fold_stats = builder.train_and_evaluate_fold(
-                    train_df=None, val_df=None, cached_data=fold_data
+                fold_iterator = tqdm(
+                    enumerate(preprocessed_folds), 
+                    desc=f"正在 {display_name} 上训练 {model_type.upper()}",
+                    total=len(preprocessed_folds),
+                    initial=start_fold_idx,
+                    leave=True
                 )
                 
-                # 增量写入结果
-                if ic_series_fold is not None and not ic_series_fold.empty:
-                    ic_series_fold.to_csv(ic_history_path, mode='a', header=not ic_history_path.exists(), index=False)
-                if oof_fold_df is not None and not oof_fold_df.empty:
-                    oof_fold_df.to_csv(oof_path, mode='a', header=not oof_path.exists(), index=False)
-                
-                # 更新遥测文件
-                with open(progress_file, 'w') as f: json.dump({'completed_folds': i + 1}, f)
-                
-                if fold_stats:
-                    postfix_str = ", ".join([f"{k}: {v}" for k, v in fold_stats.items()])
-                    fold_iterator.set_postfix_str(postfix_str)
-                
-                gc.collect()
+                for i, fold_data in fold_iterator:
+                    if i < start_fold_idx: continue
+                    
+                    artifacts, ic_series_fold, oof_fold_df, fold_stats = builder.train_and_evaluate_fold(
+                        train_df=None, val_df=None, cached_data=fold_data
+                    )
+                    
+                    if ic_series_fold is not None and not ic_series_fold.empty:
+                        ic_series_fold.to_csv(ic_history_path, mode='a', header=not ic_history_path.exists(), index=False)
+                    if oof_fold_df is not None and not oof_fold_df.empty:
+                        oof_fold_df.to_csv(oof_path, mode='a', header=not oof_path.exists(), index=False)
+                    
+                    with open(progress_file, 'w') as f: json.dump({'completed_folds': i + 1, 'status': 'in_progress'}, f)
+                    
+                    if fold_stats:
+                        postfix_str = ", ".join([f"{k}: {v}" for k, v in fold_stats.items()])
+                        fold_iterator.set_postfix_str(postfix_str)
+                    
+                    gc.collect()
 
-    if progress_file.exists():
-        progress_file.unlink() # 成功结束后，删除遥测文件
-        print("INFO: 滚动训练成功完成，已移除进度文件。")
+            with open(progress_file, 'w') as f:
+                json.dump({'status': 'final_model_pending'}, f)
+            print("INFO: 滚动训练成功完成，准备训练最终模型。")
+        else:
+            print("WARNNING: 未提供预处理 folds，跳过滚动训练。")
+            # 即使没有 folds，也要创建一个空的进度文件以进入最终模型训练
+            with open(progress_file, 'w') as f:
+                json.dump({'status': 'final_model_pending'}, f)
 
-    # 训练最终模型
+    # --- 训练最终模型 ---
     full_df = config.get('full_df_for_final_model')
     if full_df is not None:
         print(f"INFO: 正在训练最终模型...")
@@ -164,20 +177,18 @@ def run_training_for_ticker(
         scaler_file = model_dir / f"{model_type}_scaler_{timestamp}.pkl"
         
         joblib.dump(final_artifacts['scaler'], scaler_file)
-        if model_type == 'lstm':
-            # 保存模型权重
+        
+        if model_type in ['lstm', 'tabtransformer']:
             torch.save(final_artifacts['model'].state_dict(), model_file)
-            
-            # (新增) 保存元数据
             meta_file = model_dir / f"{model_type}_meta_{timestamp}.json"
             with open(meta_file, 'w', encoding='utf-8') as f:
                 json.dump(final_artifacts['metadata'], f, indent=4)
-            print(f"INFO: LSTM 元数据已保存: {meta_file.name}")
-
         else: # lgbm
             joblib.dump(final_artifacts['models'], model_file)
+        
         print(f"SUCCESS: 新版本模型已保存: {model_file.name}")
-
+        
+        # 清理旧版本模型
         num_to_keep = config.get('global_settings', {}).get('num_model_versions_to_keep', 3)
         all_model_versions = sorted(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
         
@@ -186,29 +197,31 @@ def run_training_for_ticker(
             print(f"INFO: 发现 {len(versions_to_delete)} 个旧模型版本需要清理 (保留最新的 {num_to_keep} 个)。")
             
             for old_model_path in versions_to_delete:
-                # 构件对应的 scaler 文件名
-                old_scaler_name = old_model_path.name.replace("model", "scaler").replace(model_suffix, ".pkl")
-                old_scaler_path = old_model_path.parent / old_scaler_name
+                old_timestamp = old_model_path.stem.split('_')[-1]
+                old_scaler_path = old_model_path.parent / f"{model_type}_scaler_{old_timestamp}.pkl"
                 
                 try:
-                    # 删除旧模型
-                    old_model_path.unlink()
+                    old_model_path.unlink(missing_ok=True)
                     print(f"  - SUCCESS: 已清理旧模型: {old_model_path.name}")
-                    # 删除对应的旧 scaler
-                    if old_scaler_path.exists():
-                        old_scaler_path.unlink()
-                        print(f"  - SUCCESS: 已清理旧 Scaler: {old_scaler_path.name}")
+                    old_scaler_path.unlink(missing_ok=True)
+                    print(f"  - SUCCESS: 已清理旧 Scaler: {old_scaler_path.name}")
+                    
+                    if model_type in ['lstm', 'tabtransformer']:
+                        old_meta_path = old_model_path.parent / f"{model_type}_meta_{old_timestamp}.json"
+                        old_meta_path.unlink(missing_ok=True)
+                        print(f"  - SUCCESS: 已清理旧 Meta: {old_meta_path.name}")
                 except Exception as e:
                     print(f"  - ERROR: 清理失败: {old_model_path.name}, 原因: {e}")
-                
-                if model_type == 'lstm':
-                    old_meta_name = old_model_path.name.replace("model", "meta").replace(model_suffix, ".json")
-                    old_meta_path = old_model_path.parent / old_meta_name
-                    if old_meta_path.exists():
-                        old_meta_path.unlink()
-                        print(f"  - SUCCESS: 已清理旧 Meta: {old_meta_path.name}")
+
+    # --- 最终清理 ---
+    if progress_file.exists():
+        progress_file.unlink() 
+        print("INFO: 整个训练流程（包括最终模型）成功完成，已移除进度文件。")
 
     if ic_history_path.exists():
-        return pd.read_csv(ic_history_path)
+        try:
+            return pd.read_csv(ic_history_path)
+        except Exception:
+            return None # 如果文件损坏或为空
         
     return None
