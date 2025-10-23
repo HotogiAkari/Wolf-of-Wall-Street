@@ -13,7 +13,7 @@ global_settings:
   output_dir: 'data/processed'        # 存放 L2（特征数据）和 L3（预处理数据）缓存的目录. 
   raw_ohlcv_cache_dir: 'raw_ohlcv'    # 在 data_cache_dir 下存放原始 OHLCV 数据的子目录名. 
   ic_history_file: 'ic_history.csv'   # 训练结束后，用于保存所有模型聚合后 IC 历史记录的文件名. 
-  order_history_db: 'order_history.db' # 交易历史 SQLite 数据库的文件名，由 risk_manager 使用. 
+  order_history_db: 'data/runtime_data/order_history.db' # 交易历史 SQLite 数据库的文件名，由 risk_manager 使用. 用于防止重复下单和追踪订单状态
   num_model_versions_to_keep: 3       # 模型版本控制. 对于每只股票的每个模型，只保留最近的 N 个版本，旧版本会被自动清理. 
   use_lstm_globally: True             # 是否为股票训练LSTM模型(每只股票可以单独定义)
   use_tabtransformer_globally: True   # 是否为股票训练TabTransformer模型(每只股票可以单独定义)
@@ -178,7 +178,7 @@ hpo_config:
   # 全局 HPO 设置 (作为回退的默认值)
   n_trials: 20                  # 全局默认的试验次数. 
   hpo_num_eval_folds: 2         # 全局默认的 HPO 内部评估验证集数量. 
-  tickers_for_hpo: ['000100.SZ', '000426.SZ', '000001.SZ']  # 指定一个股票子集来运行 HPO. 
+  tickers_for_hpo: ['000100.SZ']  # 指定一个股票子集来运行 HPO. 
   models_for_hpo: ['lgbm', 'lstm']                          # 定义要进行 HPO 的模型列表
   
   # --- LGBM 专属 HPO 配置 ---
@@ -260,7 +260,7 @@ default_model_params:
     warmup_steps: 10             # 前 N 轮进行学习率预热
     plateau_patience: 20     # ReduceLROnPlateau 的耐心轮次
     plateau_factor: 0.5      # ReduceLROnPlateau 降低学习率的因子 (new_lr = lr * factor)
-    units_1: 128                 # LSTM 第一个隐藏层的神经元数量. 
+    units_1: 32                 # LSTM 第一个隐藏层的神经元数量. 
     units_2: 64                 # LSTM 第二个隐藏层的神经元数量. 
     dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合. 
     early_stopping_rounds_lstm: 50 # LSTM 的早停法耐心轮次. 
@@ -301,9 +301,14 @@ stocks_to_process:
     keyword: 'TCL科技'
     industry_etf: '159928.SZ'
     # 可以在此处定制 LGBM 模型 (覆盖默认参数)
-    #lgbm_params:
-    #  num_leaves: 7
-    #  min_child_samples: 30
+    lgbm_params:
+      bagging_fraction: 0.6897766956798957
+      feature_fraction: 0.8538697768746747
+      learning_rate: 0.0026150731149229113
+      min_child_samples: 21
+      num_leaves: 21
+      reg_alpha: 0.1566497156552724
+      reg_lambda: 0.7219421446067233
   
   - ticker: '000426.SZ'
     keyword: '兴业矿业'

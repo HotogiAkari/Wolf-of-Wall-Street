@@ -273,6 +273,14 @@ class LSTMBuilder:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
-        metadata = {'input_size': X_full.shape[2], 'feature_cols': features}
+                metadata = {
+            'input_size': X_full.shape[2],
+            'feature_cols': features,
+            'model_structure': {
+                'hidden_size_1': p.get('units_1', 64),
+                'hidden_size_2': p.get('units_2', 32),
+                'dropout': p.get('dropout', 0.2)
+            }
+        }
 
         return {'model': model, 'scaler': final_scaler, 'metadata': metadata}

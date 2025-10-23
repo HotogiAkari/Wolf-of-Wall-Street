@@ -4,17 +4,20 @@ import sys
 import optuna
 import warnings
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from tqdm.autonotebook import tqdm
 
 try:
     from model.builders.lgbm_builder import LGBMBuilder
     from model.builders.lstm_builder import LSTMBuilder
+    from model.builders.tabtransformer_builder import TabTransformerBuilder
 except ImportError:
     project_root = str(Path(__file__).resolve().parents[1])
     if project_root not in sys.path: sys.path.append(project_root)
     from model.builders.lgbm_builder import LGBMBuilder
     from model.builders.lstm_builder import LSTMBuilder
+    from model.builders.tabtransformer_builder import TabTransformerBuilder
 
 # 定义“无限制”搜索时，各类参数的回退默认范围
 DEFAULT_SEARCH_RANGES = {
@@ -29,7 +32,8 @@ DEFAULT_SEARCH_RANGES = {
 
 def objective(trial, preprocessed_folds: list, config: dict, model_type: str = 'lgbm'):
     """
-    Optuna 目标函数，完全由配置文件驱动，并直接在预处理好的 folds 上进行评估。
+    (已修复) Optuna 
+目标函数，能够灵活处理不同类型的超参数定义。
     """
     hpo_trial_config = config.copy()
     
@@ -37,33 +41,70 @@ def objective(trial, preprocessed_folds: list, config: dict, model_type: str = '
     search_space = model_hpo_config.get('search_space', {})
     
     params_to_tune = {}
+    # --- (核心修复) ---
     for param, args in search_space.items():
-        p_type, low, high = args[0], args[1], args[2]
-        log = args[3] if len(args) > 3 else False
-
-        # 实现“0代表无限制”的逻辑
-        if (p_type == "int" or p_type == "float") and low == 0 and high == 0:
-            if param not in DEFAULT_SEARCH_RANGES:
-                print(f"WARNNING: '{param}' 的无限制范围未在 hpo_utils.py 中定义，跳过此参数。")
-                continue
-            default_args = DEFAULT_SEARCH_RANGES[param]
-            p_type_def, low, high = default_args[0], default_args[1], default_args[2]
-            log = default_args[3] if len(default_args) > 3 else False
+        if not isinstance(args, list) or len(args) < 2:
+            print(f"WARNNING: HPO search_space for '{param}' is malformed. Skipping.")
+            continue
         
-        if p_type == 'float':
-            params_to_tune[param] = trial.suggest_float(param, low, high, log=log)
-        elif p_type == 'int':
-            params_to_tune[param] = trial.suggest_int(param, low, high)
-        elif p_type == 'categorical':
-            params_to_tune[param] = trial.suggest_categorical(param, high) # 对于 categorical, high 是列表
+        p_type = args[0]
+        
+        # 根据类型分别处理
+        if p_type in ('float', 'int'):
+            if len(args) < 3:
+                print(f"WARNNING: HPO search_space for '{param}' requires at least 3 elements: [type, low, high]. Skipping.")
+                continue
+            
+            low, high = args[1], args[2]
+            log = args[3] if len(args) > 3 else False
+            
+            # 实现“0代表无限制”的逻辑
+            if low == 0 and high == 0:
+                if param not in DEFAULT_SEARCH_RANGES:
+                    print(f"WARNNING: '{param}' 的无限制范围未在 hpo_utils.py 中定义，跳过此参数。")
+                    continue
+                default_args = DEFAULT_SEARCH_RANGES[param]
+                low, high = default_args[1], default_args[2]
+                log = default_args[3] if len(default_args) > 3 else False
 
+            if p_type == 'float':
+                params_to_tune[param] = trial.suggest_float(param, low, high, log=log)
+            else: # int
+                params_to_tune[param] = trial.suggest_int(param, low, high)
+                
+        elif p_type == 'categorical':
+            choices = args[1]
+            if not isinstance(choices, list):
+                print(f"WARNNING: HPO search_space for categorical param '{param}' requires a list of choices. Skipping.")
+                continue
+            params_to_tune[param] = trial.suggest_categorical(param, choices)
+            
+        else:
+            print(f"WARNNING: Unknown HPO parameter type '{p_type}' for '{param}'. Skipping.")
+    # --- (修复结束) ---
+
+    # --- 模型实例化与评估 (逻辑不变) ---
+    # 动态获取 Builder 类
+    try:
+        from model.builders.lgbm_builder import LGBMBuilder
+        from model.builders.lstm_builder import LSTMBuilder
+        from model.builders.tabtransformer_builder import TabTransformerBuilder
+        builder_map = {
+            'lgbm': LGBMBuilder, 'lstm': LSTMBuilder, 'tabtransformer': TabTransformerBuilder
+        }
+        BuilderClass = builder_map[model_type]
+    except ImportError as e:
+        print(f"FATAL: HPO objective 无法导入 Builder 类: {e}")
+        return -10.0 # 返回一个极差的值
+
+    # 将搜索到的参数更新到 config 副本中
     base_params = config.get('default_model_params', {}).get(f'{model_type}_params', {}).copy()
     hpo_fixed_params = model_hpo_config.get('params', {}).copy()
     final_params = {**base_params, **hpo_fixed_params, **params_to_tune}
     
-    hpo_trial_config[f'{model_type}_params'] = final_params
-    
-    BuilderClass = LGBMBuilder if model_type == 'lgbm' else LSTMBuilder
+    # hpo_trial_config 是一个完整的 config 结构
+    if 'default_model_params' not in hpo_trial_config: hpo_trial_config['default_model_params'] = {}
+    hpo_trial_config['default_model_params'][f'{model_type}_params'] = final_params
     
     if not preprocessed_folds:
         return -10.0
@@ -73,21 +114,26 @@ def objective(trial, preprocessed_folds: list, config: dict, model_type: str = '
     
     for fold_data in preprocessed_folds:
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore") # 忽略此 with 块内的所有警告
+            warnings.simplefilter("ignore")
             
-            # 调用 builder 的训练和评估方法，并正确解包 3 个返回值
-            _, ic_series, _ = builder.train_and_evaluate_fold(
+            # 接收 4 个返回值
+            _, ic_series_fold, _, _ = builder.train_and_evaluate_fold(
                 train_df=None, val_df=None, cached_data=fold_data
             )
             
-            if ic_series is not None and not ic_series.empty:
-                ic_scores.append(ic_series['rank_ic'].iloc[0])
+            if ic_series_fold is not None and not ic_series_fold.empty:
+                ic_scores.append(ic_series_fold['rank_ic'].iloc[0])
     
-    if not ic_scores or len(ic_scores) < 2: # 确保至少有两个有效的 IC 值来计算 ICIR
+    if not ic_scores or np.isnan(ic_scores).all():
         return -10.0
+    
+    # 过滤掉 nan 值再计算
+    valid_ic_scores = [s for s in ic_scores if pd.notna(s)]
+    if len(valid_ic_scores) < 2:
+        return np.mean(valid_ic_scores) if valid_ic_scores else -10.0
         
-    mean_ic = np.mean(ic_scores)
-    std_ic = np.std(ic_scores)
+    mean_ic = np.mean(valid_ic_scores)
+    std_ic = np.std(valid_ic_scores)
     
     if std_ic < 1e-8:
         return mean_ic * 10 if mean_ic > 0 else -10

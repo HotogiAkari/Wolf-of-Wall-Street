@@ -224,6 +224,7 @@ class TabTransformerBuilder:
         cat_dims = [len(encoders[col].classes_) for col in cat_features]
 
         # --- 6. 模型训练 (与之前类似) ---
+        p = self.model_params
         model = TabTransformerModel(
             num_continuous=len(cont_features),
             cat_dims=cat_dims, # <-- 使用正确的 cat_dims
@@ -255,10 +256,22 @@ class TabTransformerBuilder:
         print("    - SUCCESS: Final TabTransformer model training complete.")
         
         metadata = {
-            'cat_dims': cat_dims, 
+            # 数据描述
             'feature_cols': features,
             'cat_features': cat_features,
-            'cont_features': cont_features
+            'cont_features': cont_features,
+            'cat_dims': cat_dims, 
+            
+            # (新增) 模型结构参数
+            'model_structure': {
+                'num_continuous': len(cont_features),
+                'dim': p.get('dim', 32),
+                'depth': p.get('depth', 4),
+                'heads': p.get('heads', 4),
+                'attn_dropout': p.get('dropout', 0.1),
+                'ff_dropout': p.get('dropout', 0.1)
+            }
         }
+
 
         return {'model': model, 'scaler': final_scaler, 'metadata': metadata, 'encoders': encoders}

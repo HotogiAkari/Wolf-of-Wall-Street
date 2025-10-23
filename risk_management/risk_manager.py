@@ -29,6 +29,12 @@ class RiskManager:
         self.db_path = Path(db_path)
         self.conn = None
         try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"INFO: 确保运行时数据目录 '{self.db_path.parent}' 已存在。")
+        except Exception as e:
+            print(f"WARNNING: 创建数据库目录时出错: {e}")
+            
+        try:
             self.conn = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=False)
             self._initialize_db()
             print(f"SUCCESS: RiskManager initialized and connected to '{self.db_path}'.")

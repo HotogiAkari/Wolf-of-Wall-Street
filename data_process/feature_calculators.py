@@ -533,29 +533,45 @@ class CandleQuantCalculator(FeatureCalculator):
 
 class IntermarketCorrelationCalculator(FeatureCalculator):
     """
-    计算与外部市场（如美股SPY）的滚动相关性。
+    (已重构) 计算与一个或多个外部市场的滚动相关性。
     """
     @property
     def name(self) -> str:
         return "跨市场关联特征"
 
     def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        # 这个计算器依赖于从kwargs传入的外部市场数据
         external_market_df = kwargs.get('external_market_df')
-        if external_market_df is None:
+        if external_market_df is None or external_market_df.empty:
             print(f"  - [计算特征] 信息: 未提供外部市场数据，跳过 {self.name}。")
             return df
             
         print(f"  - [计算特征] 正在运行: {self.name}...")
         
         stock_ret = df['close'].pct_change()
-        # 需要先合并再计算，以保证日期对齐
-        df_merged = pd.DataFrame({'stock_ret': stock_ret}).join(external_market_df)
-        df_merged['external_ret'] = df_merged['close_ext'].pct_change()
         
-        # 计算60日（约3个月）的滚动相关系数
-        df['corr_with_external_60d'] = df_merged['stock_ret'].rolling(60).corr(df_merged['external_ret'])
-        print(f"    - 已计算: 与外部市场的60日滚动相关性")
+        # --- (核心修改) 循环处理所有外部市场的 'close' 列 ---
+        # 我们查找所有以 'close_' 开头的列，例如 'close_SPY', 'close_QQQ'
+        close_cols_external = [col for col in external_market_df.columns if col.startswith('close_')]
+
+        if not close_cols_external:
+            print(f"    - WARNNING: 在提供的 external_market_df 中未找到任何 'close_' 开头的列。跳过。")
+            return df
+
+        for ext_close_col in close_cols_external:
+            # 从列名中提取 Ticker, 例如 'close_SPY' -> 'SPY'
+            ext_ticker = ext_close_col.replace('close_', '')
+            
+            # 创建一个临时的 DataFrame 用于计算，只包含当前外部市场的数据
+            df_merged = pd.DataFrame({'stock_ret': stock_ret}).join(external_market_df[[ext_close_col]])
+            
+            # 计算该外部市场的日收益率
+            df_merged['external_ret'] = df_merged[ext_close_col].pct_change()
+            
+            # 计算滚动相关系数，并在新特征的列名中包含 Ticker
+            corr_col_name = f'corr_with_{ext_ticker}_60d'
+            df[corr_col_name] = df_merged['stock_ret'].rolling(60).corr(df_merged['external_ret'])
+            
+            print(f"    - 已计算: 与 {ext_ticker} 的60日滚动相关性 (列名: {corr_col_name})")
         
         return df
 
