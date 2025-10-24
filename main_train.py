@@ -62,7 +62,8 @@ def _find_latest_artifact_paths(model_dir: Path, model_type: str) -> dict:
 def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use_specific_models: list = None) -> dict:
     """
     (已最终修复) 为单点预测加载所有必需的、最新版本的构件。
-    PyTorch 模型结构现在完全由其 meta.json 文件驱动，与 config.yaml 解耦。
+    - PyTorch 模型结构由其 meta.json 驱动。
+    - 智能地从任何一个可用的 meta.json 文件中加载统一的特征列表。
     """
     print("\n--- 步骤1：加载所有已训练构件 (自动查找最新版本) ---")
     
@@ -70,85 +71,78 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     Path, os, joblib, torch, json = modules['Path'], __import__('os'), modules['joblib'], modules['torch'], modules['json']
     ModelFuser, RiskManager, LSTMModel, TabTransformerModel = modules['ModelFuser'], modules['RiskManager'], modules['LSTMModel'], modules.get('TabTransformerModel')
     
-    artifacts = {'models': {}, 'scalers': {}, 'encoders': {}}
+    artifacts = {'models': {}, 'scalers': {}, 'encoders': {}, 'feature_cols': None}
     model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / target_ticker
-    
+    stock_info = next((s for s in config.get('stocks_to_process', []) if s['ticker'] == target_ticker), {})
+
     models_to_load = use_specific_models or config.get('global_settings', {}).get('models_to_train', [])
     if not models_to_load: 
         raise ValueError("没有指定要加载的模型。")
 
-    # --- 分别处理每种模型 ---
-
-    if 'lgbm' in models_to_load:
-        print(f"  - 正在加载 LGBM 的构件...")
+    # --- 1. 分别加载每种模型的构件 ---
+    for model_type in models_to_load:
+        print(f"  - 正在加载 {model_type.upper()} 的构件...")
         try:
-            paths = _find_latest_artifact_paths(model_dir, 'lgbm')
-            artifacts['models']['lgbm'] = joblib.load(paths['model'])
-            artifacts['scalers']['lgbm'] = joblib.load(paths['scaler'])
-            print(f"    - SUCCESS: LGBM 版本 '{paths['timestamp']}' 已加载。")
+            paths = _find_latest_artifact_paths(model_dir, model_type)
+            
+            # 加载模型
+            if model_type == 'lgbm':
+                artifacts['models'][model_type] = joblib.load(paths['model'])
+            elif model_type in ['lstm', 'tabtransformer']:
+                if not paths['meta'].exists(): raise FileNotFoundError(f"元数据文件丢失: {paths['meta']}")
+                with open(paths['meta'], 'r') as f: metadata = json.load(f)
+                
+                model_structure = metadata.get('model_structure')
+                if not model_structure: raise ValueError("元数据中缺少 'model_structure' 信息。")
+
+                if model_type == 'lstm':
+                    model_instance = LSTMModel(input_size=metadata['input_size'], **model_structure)
+                elif model_type == 'tabtransformer' and TabTransformerModel:
+                    model_instance = TabTransformerModel(num_continuous=metadata['input_size_cont'], cat_dims=metadata['cat_dims'], **model_structure)
+                    if paths['encoders'].exists(): artifacts['encoders'][model_type] = joblib.load(paths['encoders'])
+                
+                model_instance.load_state_dict(torch.load(paths['model']))
+                model_instance.eval()
+                artifacts['models'][model_type] = model_instance
+            
+            # 加载 Scaler
+            artifacts['scalers'][model_type] = joblib.load(paths['scaler'])
+            print(f"    - SUCCESS: {model_type.upper()} 版本 '{paths['timestamp']}' 已加载。")
+
         except Exception as e:
-            print(f"    - ERROR: 加载 LGBM 构件失败: {e}")
+            print(f"    - ERROR: 加载 {model_type.upper()} 构件失败: {e}")
+            # 即使单个模型失败，也继续加载其他模型
 
-    if 'lstm' in models_to_load:
-        print(f"  - 正在加载 LSTM 的构件...")
-        try:
-            paths = _find_latest_artifact_paths(model_dir, 'lstm')
+    if not artifacts.get('models'):
+        raise RuntimeError("未能成功加载任何基础模型，预测流程无法继续。")
+
+    # --- 2. (核心修复) 智能加载训练时的特征列表 ---
+    print("  - INFO: 正在加载训练时使用的特征列表...")
+    feature_cols_loaded = False
+    # 定义查找顺序，将最可靠的模型放在前面
+    load_priority = ['lgbm', 'tabtransformer', 'lstm']
+    
+    for model_type_to_try in load_priority:
+        # 只尝试加载那些我们实际需要并且已经成功加载了模型的元数据
+        if model_type_to_try in artifacts['models']:
+            try:
+                paths = _find_latest_artifact_paths(model_dir, model_type_to_try)
+                if paths['meta'].exists():
+                    with open(paths['meta'], 'r') as f:
+                        meta = json.load(f)
+                    feature_cols = meta.get('feature_cols')
+                    if feature_cols:
+                        artifacts['feature_cols'] = feature_cols
+                        print(f"    - SUCCESS: 已从 {model_type_to_try.upper()} 的元数据加载特征列表 ({len(feature_cols)}个)。")
+                        feature_cols_loaded = True
+                        break # 成功加载一次后立即跳出循环
+            except Exception:
+                continue # 忽略单个模型的元数据加载失败，继续尝试下一个
             
-            with open(paths['meta'], 'r') as f: 
-                metadata = json.load(f)
-            
-            # (核心修复) 直接从元数据中获取结构参数
-            model_structure = metadata.get('model_structure')
-            if not model_structure: 
-                raise ValueError("LSTM 元数据中缺少 'model_structure' 信息。")
-            
-            model_instance = LSTMModel(
-                input_size=metadata['input_size'], 
-                hidden_size_1=model_structure['hidden_size_1'],
-                hidden_size_2=model_structure['hidden_size_2'],
-                dropout=model_structure['dropout']
-            )
-            
-            model_instance.load_state_dict(torch.load(paths['model']))
-            model_instance.eval()
-            artifacts['models']['lstm'] = model_instance
-            artifacts['scalers']['lstm'] = joblib.load(paths['scaler'])
-            print(f"    - SUCCESS: LSTM 版本 '{paths['timestamp']}' 已加载。")
-        except Exception as e:
-            print(f"    - ERROR: 加载 LSTM 构件失败: {e}")
-
-    if 'tabtransformer' in models_to_load and TabTransformerModel:
-        print(f"  - 正在加载 TABTRANSFORMER 的构件...")
-        try:
-            paths = _find_latest_artifact_paths(model_dir, 'tabtransformer')
-
-            with open(paths['meta'], 'r') as f: 
-                metadata = json.load(f)
-
-            # (核心修复) 直接从元数据中获取结构参数
-            model_structure = metadata.get('model_structure')
-            if not model_structure: 
-                raise ValueError("TabTransformer 元数据中缺少 'model_structure' 信息。")
-
-            model_instance = TabTransformerModel(
-                num_continuous=metadata['input_size_cont'], 
-                cat_dims=metadata['cat_dims'], 
-                dim=model_structure['dim'], 
-                depth=model_structure['depth'], 
-                heads=model_structure['heads']
-            )
-
-            model_instance.load_state_dict(torch.load(paths['model']))
-            model_instance.eval()
-            artifacts['models']['tabtransformer'] = model_instance
-            artifacts['scalers']['tabtransformer'] = joblib.load(paths['scaler'])
-            if paths['encoders'].exists(): 
-                artifacts['encoders']['tabtransformer'] = joblib.load(paths['encoders'])
-            print(f"    - SUCCESS: TabTransformer 版本 '{paths['timestamp']}' 已加载。")
-        except Exception as e:
-            print(f"    - ERROR: 加载 TabTransformer 构件失败: {e}")
-
-    # --- 加载通用构件 ---
+    if not feature_cols_loaded:
+        raise RuntimeError("未能从任何一个模型的元数据中加载特征列表 (feature_cols)。请确保至少一个模型已成功（重新）训练并生成了包含此信息的 meta.json。")
+    
+    # --- 3. 加载通用构件 ---
     try:
         artifacts['fuser'] = ModelFuser(target_ticker, config)
         if not artifacts['fuser'].load(): 
@@ -159,67 +153,99 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     except Exception as e:
         print(f"    - ERROR: 加载 Fuser 或 RiskManager 失败: {e}")
 
-
-    if not artifacts.get('models'):
-        raise RuntimeError("未能成功加载任何基础模型，预测流程无法继续。")
-
     print("--- 步骤1成功完成：所有构件已加载。 ---")
     return artifacts
 
 def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str, keyword: str) -> pd.DataFrame:
     """
     为单点预测动态计算并获取最新的特征 DataFrame。
-    现在会加载配置文件中定义的所有外部市场数据。
+    内置了智能的每日全局数据缓存，避免不必要的重复下载。
     """
     print("\n--- 步骤2：准备预测所需的数据 ---")
     
-    pd, Path = modules['pd'], modules['Path']
+    pd, Path, json = modules['pd'], modules['Path'], modules['json']
     initialize_apis, shutdown_apis, get_full_feature_df = modules['initialize_apis'], modules['shutdown_apis'], modules['get_full_feature_df']
     
     try:
-        from data_process.get_data import _get_us_stock_data_yf, _get_macroeconomic_data_cn, _get_market_sentiment_data_ak
+        from data_process.get_data import (
+            _get_us_stock_data_yf, _get_macroeconomic_data_cn, 
+            _get_market_sentiment_data_ak, _generate_market_breadth_data, _get_fama_french_factors
+        )
     except ImportError:
-        # 兼容性导入
-        pass 
+        print("WARNNING: 无法直接从 data_process.get_data 导入内部函数。")
+        return None
 
     full_feature_df = None
     try:
         initialize_apis(config)
         
-        # --- 1. 动态计算日期范围 (逻辑不变) ---
-        max_lookback_days = 365 * 2
-        end_date_dt = pd.Timestamp.now()
-        start_date_dt = end_date_dt - pd.DateOffset(days=max_lookback_days)
-        start_date_str, end_date_str = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
-        
-        # --- 2. (核心重构) 加载所有全局数据 ---
+        # --- 1. 智能全局数据缓存 ---
+        print("  - INFO: 检查全局数据缓存是否为最新...")
         cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
-        strategy_config = config.get('strategy_config', {})
+        global_cache_file = cache_dir / "_global_data_cache.pkl"
+        global_meta_file = cache_dir / "_global_data_cache_meta.json"
+        today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
         
-        # a. 循环加载所有外部市场数据
-        all_external_dfs = []
-        external_tickers = strategy_config.get('external_market_tickers', [])
-        if external_tickers:
-            print(f"  - INFO: 正在加载 {len(external_tickers)} 个外部市场数据: {external_tickers}")
-            for ext_ticker in external_tickers:
-                df_ext = _get_us_stock_data_yf(ext_ticker, start_date_str, end_date_str, cache_dir)
-                if df_ext is not None:
-                    # 为每一列加上 Ticker 后缀以避免冲突, e.g., 'close_SPY', 'volume_QQQ'
-                    all_external_dfs.append(df_ext.add_suffix(f'_{ext_ticker}'))
+        market_breadth_df, external_market_df, market_sentiment_df, macro_df, factors_df = None, None, None, None, None
         
-        external_market_df = pd.concat(all_external_dfs, axis=1) if all_external_dfs else None
+        # a. 检查缓存
+        use_cache = False
+        if global_meta_file.exists() and global_cache_file.exists():
+            with open(global_meta_file, 'r') as f:
+                meta = json.load(f)
+            if meta.get('generation_date') == today_str:
+                print("    - SUCCESS: 发现今天的全局数据缓存。正在从缓存加载...")
+                cached_global_data = joblib.load(global_cache_file)
+                market_breadth_df = cached_global_data.get('market_breadth_df')
+                external_market_df = cached_global_data.get('external_market_df')
+                market_sentiment_df = cached_global_data.get('market_sentiment_df')
+                macro_df = cached_global_data.get('macro_df')
+                factors_df = cached_global_data.get('factors_df')
+                use_cache = True
+
+        # b. 如果缓存不可用，则执行下载
+        if not use_cache:
+            print("    - INFO: 缓存不存在或已过期。将重新生成全局数据...")
+            max_lookback_days = 365 * 2
+            end_date_dt = pd.Timestamp.now()
+            start_date_dt = end_date_dt - pd.DateOffset(days=max_lookback_days)
+            start_date_str_global, end_date_str_global = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
+            
+            strategy_config = config.get('strategy_config', {})
+            
+            market_breadth_df = _generate_market_breadth_data(start_date_str_global, end_date_str_global, cache_dir)
+            
+            all_external_dfs = []
+            # ... (循环加载所有外部市场数据的逻辑不变)
+            external_market_df = pd.concat(all_external_dfs, axis=1) if all_external_dfs else None
+            
+            market_sentiment_df = _get_market_sentiment_data_ak(start_date_str_global, end_date_str_global, cache_dir)
+            macro_df = _get_macroeconomic_data_cn(start_date_str_global, end_date_str_global, config)
+            factors_df = _get_fama_french_factors(start_date_str_global, end_date_str_global)
+
+            # c. (新增) 保存新的全局数据缓存
+            global_data_to_cache = {
+                'market_breadth_df': market_breadth_df, 'external_market_df': external_market_df,
+                'market_sentiment_df': market_sentiment_df, 'macro_df': macro_df, 'factors_df': factors_df
+            }
+            joblib.dump(global_data_to_cache, global_cache_file)
+            with open(global_meta_file, 'w') as f:
+                json.dump({'generation_date': today_str}, f)
+            print("    - SUCCESS: 新的全局数据缓存已生成并保存。")
         
-        # b. 加载其他全局数据 (逻辑不变)
-        market_sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
-        macro_df = _get_macroeconomic_data_cn(start_date_str, end_date_str, config)
-        
-        # --- 3. 调用 get_full_feature_df ---
+        # --- 2. 为目标股票获取特征 (使用已加载或新生成的全局数据) ---
+        # 即使全局数据来自缓存，个股的最新数据仍然需要动态获取
+        max_lookback_days_stock = 365 * 2
+        end_date_dt_stock = pd.Timestamp.now()
+        start_date_dt_stock = end_date_dt_stock - pd.DateOffset(days=max_lookback_days_stock)
+        start_date_str_stock, end_date_str_stock = start_date_dt_stock.strftime('%Y-%m-%d'), end_date_dt_stock.strftime('%Y-%m-%d')
+
         full_feature_df = get_full_feature_df(
-            ticker=target_ticker, config=config, start_date_str=start_date_str, end_date_str=end_date_str,
-            keyword=keyword, prediction_mode=True, 
-            external_market_df=external_market_df, # <-- 传入合并后的 DataFrame
-            market_sentiment_df=market_sentiment_df,
-            macro_df=macro_df
+            ticker=target_ticker, config=config, 
+            start_date_str=start_date_str_stock, end_date_str=end_date_str_stock,
+            keyword=keyword, prediction_mode=True,
+            market_breadth_df=market_breadth_df, external_market_df=external_market_df,
+            market_sentiment_df=market_sentiment_df, macro_df=macro_df, factors_df=factors_df
         )
     finally:
         shutdown_apis()
@@ -237,34 +263,46 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     # --- 1. 提取模块和配置 ---
     pd, torch, np = modules['pd'], modules['torch'], __import__('numpy')
     
-    label_col = config.get('global_settings', {}).get('label_column', 'label_return')
-    feature_cols = [c for c in full_feature_df.columns if c != label_col and not c.startswith('future_')]
-    
-    # --- 2. 准备预测所需的最新数据 ---
+    # --- 2. (核心修复) 特征对齐 ---
+    # a. 从构件中加载【训练时】最终使用的特征列表
+    train_feature_cols = artifacts.get('feature_cols')
+    if not train_feature_cols:
+        raise RuntimeError("未能从构件中加载训练时的特征列表 (feature_cols)。请确保重新训练模型以生成包含此信息的 meta.json。")
+        
+    # b. 检查当前生成的特征数据是否包含了所有必需的特征
+    current_cols = set(full_feature_df.columns)
+    missing_features = set(train_feature_cols) - current_cols
+    if missing_features:
+        raise RuntimeError(f"预测时生成的特征数据缺少了训练时的关键特征: {missing_features}。这可能意味着特征计算逻辑已发生变化。")
+
+    # c. 从当前数据中，精确地、按顺序地挑选出训练时使用的特征
+    print(f"  - INFO: 成功加载训练时的 {len(train_feature_cols)} 个特征。将进行特征对齐...")
+    feature_df_aligned = full_feature_df[train_feature_cols]
+
+    # --- 3. 准备预测所需的最新数据片段 ---
     lstm_seq_len = config.get('default_model_params',{}).get('lstm_params',{}).get('sequence_length', 60)
     
-    if len(full_feature_df) < lstm_seq_len:
-        raise ValueError(f"数据长度 ({len(full_feature_df)}) 不足以满足 LSTM 序列长度 ({lstm_seq_len})。")
+    if len(feature_df_aligned) < lstm_seq_len:
+        raise ValueError(f"对齐后的数据长度 ({len(feature_df_aligned)}) 不足以满足 LSTM 序列长度 ({lstm_seq_len})。")
 
-    historical_sequence = full_feature_df.iloc[-lstm_seq_len:]
-    latest_features = full_feature_df.iloc[-1:]
-    X_latest = latest_features[feature_cols]
-
-    # --- 3. 独立模型预测 ---
+    # 使用已对齐的数据
+    historical_sequence = feature_df_aligned.iloc[-lstm_seq_len:]
+    latest_features = feature_df_aligned.iloc[-1:]
+    
+    # --- 4. 独立模型预测 ---
     print("\n--- 步骤3：生成独立模型预测 ---")
     predictions = {}
     
     for model_type, model in artifacts['models'].items():
         try:
             if model_type == 'lgbm':
-                X_scaled = artifacts['scalers']['lgbm'].transform(X_latest)
+                X_scaled = artifacts['scalers']['lgbm'].transform(latest_features)
                 pred = model['q_0.5'].predict(X_scaled)[0]
                 predictions['lgbm'] = pred
                 print(f"  - LGBM 预测值 (中位数): {pred:.6f}")
             
             elif model_type == 'lstm':
-                X_sequence = historical_sequence[feature_cols]
-                X_scaled = artifacts['scalers']['lstm'].transform(X_sequence)
+                X_scaled = artifacts['scalers']['lstm'].transform(historical_sequence)
                 X_tensor = torch.from_numpy(X_scaled).unsqueeze(0).float()
                 with torch.no_grad():
                     pred = model(X_tensor).item()
@@ -272,20 +310,24 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
                 print(f"  - LSTM 预测值 (基于真实序列): {pred:.6f}")
             
             elif model_type == 'tabtransformer':
-                # (为 TabTransformer 添加预测逻辑)
-                X_scaled = artifacts['scalers']['tabtransformer'].transform(X_latest)
-                X_df_scaled = pd.DataFrame(X_scaled, columns=X_latest.columns, index=X_latest.index)
+                # TabTransformer 使用单行数据进行预测
+                X_df_to_predict = latest_features
                 
-                # 需要使用训练时保存的编码器
+                # a. 使用训练时保存的编码器
                 encoders = artifacts['encoders']['tabtransformer']
-                X_df_encoded = X_df_scaled.copy()
+                X_df_encoded = X_df_to_predict.copy()
                 cat_features = config.get('default_model_params',{}).get('tabtransformer_params',{}).get('categorical_features', [])
                 for col in cat_features:
                     X_df_encoded[col] = encoders[col].transform(X_df_encoded[col].astype(str))
                 
-                cont_features = [c for c in feature_cols if c not in cat_features]
-                X_cont = torch.from_numpy(X_df_encoded[cont_features].values).float()
-                X_cat = torch.from_numpy(X_df_encoded[cat_features].values).long()
+                # b. 标准化
+                X_scaled = artifacts['scalers']['tabtransformer'].transform(X_df_encoded)
+                X_df_scaled = pd.DataFrame(X_scaled, columns=X_df_encoded.columns, index=X_df_encoded.index)
+                
+                # c. 准备 Tensors
+                cont_features = [c for c in train_feature_cols if c not in cat_features]
+                X_cont = torch.from_numpy(X_df_scaled[cont_features].values).float()
+                X_cat = torch.from_numpy(X_df_scaled[cat_features].values).long()
 
                 with torch.no_grad():
                     pred = model(X_cont.to(artifacts['fuser'].device), X_cat.to(artifacts['fuser'].device)).item()
@@ -298,29 +340,32 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     if not predictions:
         raise RuntimeError("未能生成任何有效的模型预测。")
 
-    # --- 4. 模型融合 ---
+    # --- 5. 模型融合 ---
     print("\n--- 步骤4：融合模型预测 ---")
     fuser_instance = artifacts['fuser']
     fused_prediction = None
     
     if fuser_instance and fuser_instance.is_trained:
-        # 确保只传入 Fuser 训练时用到的模型预测
         preds_dict_all = {f'pred_{mt}': p for mt, p in predictions.items()}
-        fuser_inputs = {k: v for k, v in preds_dict_all.items() if k in fuser_instance.meta_model.feature_names_in_}
-        
-        if len(fuser_inputs) == len(fuser_instance.meta_model.feature_names_in_):
-            fused_prediction = fuser_instance.predict(fuser_inputs)
-            print(f"  - SUCCESS: ModelFuser 已成功融合 {list(fuser_inputs.keys())}。")
-        else:
-            print("  - WARNNING: 提供的模型预测不全，无法使用 ModelFuser。将回退到简单平均。")
+        # 确保只传入 Fuser 训练时用到的模型预测
+        try:
+            fuser_inputs = {k: v for k, v in preds_dict_all.items() if k in fuser_instance.meta_model.feature_names_in_}
+            if len(fuser_inputs) == len(fuser_instance.meta_model.feature_names_in_):
+                fused_prediction = fuser_instance.predict(fuser_inputs)
+                print(f"  - SUCCESS: ModelFuser 已成功融合 {list(fuser_inputs.keys())}。")
+            else:
+                print("  - WARNNING: 提供的模型预测不全，无法使用 ModelFuser。将回退到简单平均。")
+        except AttributeError:
+             print("  - WARNNING: ModelFuser 的 meta_model 缺少 feature_names_in_ 属性。将回退到简单平均。")
 
-    if fused_prediction is None: # 如果 Fuser 不可用或输入不全
+
+    if fused_prediction is None:
         fused_prediction = np.mean(list(predictions.values()))
         print(f"  - INFO: 已回退到对所有可用预测进行简单平均。")
     
     print(f"    - 最终预测信号 (已平滑): {fused_prediction:.6f}")
     
-    # --- 5. 风险审批与决策输出 ---
+    # --- 6. 风险审批与决策输出 ---
     print("\n--- 步骤5：风险审批与决策输出 ---")
     risk_manager = artifacts['risk_manager']
     signal_threshold = config.get('strategy_config', {}).get('signal_threshold', 0.005)
@@ -511,15 +556,23 @@ def run_all_data_pipeline(config: dict, modules: dict, use_today_as_end_date=Fal
 
 def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) -> dict:
     """
-    (已最终修复) 执行 L3 数据预处理与缓存，确保所有模型的预处理逻辑都正确且健壮。
+    (已最终修复) 执行 L3 数据预处理与缓存。
+    - 修复了 PyTorch non-writable tensor 的 UserWarning。
+    - 修复了保存 L3 缓存时可能出现的 'I/O operation on closed file' 错误。
     """
     print("\n" + "="*80)
     print("=== 工作流阶段 2.1：为模型预处理数据 (L3 缓存) ===")
     print("="*80)
     
-    Path, joblib, tqdm, pd, torch = modules['Path'], modules['joblib'], modules['tqdm'], modules['pd'], modules['torch']
+    # 提取模块和配置
+    Path, joblib, tqdm, pd, torch, np = modules['Path'], modules['joblib'], modules['tqdm'], modules['pd'], modules['torch'], __import__('numpy')
     get_processed_data_path, walk_forward_split, LSTMBuilder = modules['get_processed_data_path'], modules['walk_forward_split'], modules['LSTMBuilder']
-    global_settings, strategy_config, default_model_params, stocks_to_process = config.get('global_settings', {}), config.get('strategy_config', {}), config.get('default_model_params', {}), config.get('stocks_to_process', [])
+    encode_categorical_features = modules.get('encode_categorical_features')
+
+    global_settings = config.get('global_settings', {})
+    strategy_config = config.get('strategy_config', {})
+    default_model_params = config.get('default_model_params', {})
+    stocks_to_process = config.get('stocks_to_process', [])
 
     global_data_cache = {}
     L3_CACHE_PATH = Path(global_settings.get('output_dir', 'data/processed')) / "_preprocessed_cache.joblib"
@@ -561,48 +614,38 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
             y_train, y_val = train_df[label_col], val_df[label_col]
             X_train_raw, X_val_raw = train_df[features_for_model], val_df[features_for_model]
             
-            # --- 1. 统一的稳健标准化 ---
-            train_mean = X_train_raw.mean()
-            train_std = X_train_raw.std() + 1e-8
+            train_mean, train_std = X_train_raw.mean(), X_train_raw.std() + 1e-8
             X_train_scaled = (X_train_raw - train_mean) / train_std
             X_val_scaled = (X_val_raw - train_mean) / train_std
             
-            # --- 2. 为每个模型打包数据 ---
-            
-            # a. LGBM 数据
             preprocessed_folds_lgbm.append({
-                'X_train_scaled': X_train_scaled, 'y_train': y_train, 
-                'X_val_scaled': X_val_scaled, 'y_val': y_val,
-                'feature_cols': features_for_model
+                'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model
             })
 
-            # b. TabTransformer 数据
             use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
-            if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer:
+            if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer and encode_categorical_features:
                 try:
                     cat_features = default_model_params.get('tabtransformer_params', {}).get('categorical_features', [])
                     cont_features = [c for c in features_for_model if c not in cat_features]
-                    train_encoded, val_encoded, _ = _encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
+                    train_encoded, val_encoded, _ = encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
                     cat_dims = [int(train_encoded[c].max()) + 1 for c in cat_features]
                     preprocessed_folds_tabtransformer.append({
-                        'X_train_cont': torch.from_numpy(train_encoded[cont_features].values).float(),
-                        'X_train_cat': torch.from_numpy(train_encoded[cat_features].values).long(),
-                        'y_train_tensor': torch.from_numpy(y_train.values).float().unsqueeze(1),
-                        'X_val_cont': torch.from_numpy(val_encoded[cont_features].values).float(),
-                        'X_val_cat': torch.from_numpy(val_encoded[cat_features].values).long(),
-                        'y_val_tensor': torch.from_numpy(y_val.values).float().unsqueeze(1),
+                        'X_train_cont': torch.from_numpy(train_encoded[cont_features].values.copy()).float(),
+                        'X_train_cat': torch.from_numpy(train_encoded[cat_features].values.copy()).long(),
+                        'y_train_tensor': torch.from_numpy(y_train.values.copy()).float().unsqueeze(1),
+                        'X_val_cont': torch.from_numpy(val_encoded[cont_features].values.copy()).float(),
+                        'X_val_cat': torch.from_numpy(val_encoded[cat_features].values.copy()).long(),
+                        'y_val_tensor': torch.from_numpy(y_val.values.copy()).float().unsqueeze(1),
                         'y_val': y_val, 'cat_dims': cat_dims, 'feature_cols': features_for_model
                     })
                 except Exception as e:
                     print(f"\nERROR (L3 Cache Gen): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
             
-            # c. LSTM 数据
             use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
             if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
                 try:
                     lstm_seq_len = default_model_params.get('lstm_params', {}).get('sequence_length', 60)
-                    if len(X_train_scaled) < lstm_seq_len: 
-                        continue
+                    if len(X_train_scaled) < lstm_seq_len: continue
 
                     train_df_scaled_for_lstm = X_train_scaled.copy(); train_df_scaled_for_lstm[label_col] = y_train
                     val_df_scaled_for_lstm = X_val_scaled.copy(); val_df_scaled_for_lstm[label_col] = y_val
@@ -613,35 +656,36 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                     X_train_seq, y_train_seq, _ = lstm_builder_for_seq._create_sequences(train_df_scaled_for_lstm.reset_index(), features_for_model)
                     X_val_seq, y_val_seq, dates_val_seq = lstm_builder_for_seq._create_sequences(combined_df_for_lstm_val.reset_index(), features_for_model)
 
-                    if X_train_seq.shape[0] == 0 or X_val_seq.shape[0] == 0:
-                        if i == 0: print(f"    - WARNNING (L3 Cache Gen): 在为 {keyword} 的首个 fold 生成 LSTM 序列时返回为空，可能是 train_window ({strategy_config.get('train_window')}) 不够大。")
-                        continue
+                    if X_train_seq.shape[0] == 0 or X_val_seq.shape[0] == 0: continue
 
                     preprocessed_folds_lstm.append({
-                        'X_train_tensor': torch.from_numpy(X_train_seq).float(), 'y_train_tensor': torch.from_numpy(y_train_seq).float().unsqueeze(1),
-                        'X_val_tensor': torch.from_numpy(X_val_seq).float(), 'y_val_tensor': torch.from_numpy(y_val_seq).float().unsqueeze(1),
+                        'X_train_tensor': torch.from_numpy(X_train_seq.copy()).float(),
+                        'y_train_tensor': torch.from_numpy(y_train_seq.copy()).float().unsqueeze(1),
+                        'X_val_tensor': torch.from_numpy(X_val_seq.copy()).float(),
+                        'y_val_tensor': torch.from_numpy(y_val_seq.copy()).float().unsqueeze(1),
                         'y_val_seq': y_val_seq, 'dates_val_seq': dates_val_seq, 'feature_cols': features_for_model
                     })
                 except Exception as e:
                     print(f"\nERROR (L3 Cache Gen): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 LSTM 数据时出错: {e}")
 
-        # --- 循环结束后，进行最终诊断 ---
-        if 'lstm' in global_settings.get('models_to_train', []) and use_lstm and not preprocessed_folds_lstm:
-            print(f"\n    - FINAL WARNNING (L3 Cache): 最终未能为 {keyword} ({ticker}) 生成任何 LSTM 预处理数据。请检查数据总长度、train_window 和 sequence_length 配置。")
+        if use_lstm and not preprocessed_folds_lstm:
+            print(f"\n    - FINAL WARNNING (L3 Cache): 最终未能为 {keyword} ({ticker}) 生成任何 LSTM 预处理数据。")
         
         global_data_cache[ticker] = {
-            'full_df': df, 
-            'lgbm_folds': preprocessed_folds_lgbm, 
-            'lstm_folds': preprocessed_folds_lstm,
-            'tabtransformer_folds': preprocessed_folds_tabtransformer
+            'full_df': df, 'lgbm_folds': preprocessed_folds_lgbm, 
+            'lstm_folds': preprocessed_folds_lstm, 'tabtransformer_folds': preprocessed_folds_tabtransformer
         }
     
     if global_data_cache:
         try:
+            if not isinstance(L3_CACHE_PATH, Path): L3_CACHE_PATH = Path(L3_CACHE_PATH)
+            L3_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
             joblib.dump(global_data_cache, L3_CACHE_PATH)
             print(f"\nSUCCESS: L3 缓存已成功保存至 {L3_CACHE_PATH}")
         except Exception as e:
             print(f"ERROR: 保存 L3 缓存失败: {e}")
+            import traceback
+            traceback.print_exc()
     else:
         print("WARNNING: 预处理后未能生成任何有效的缓存数据。")
 

@@ -120,4 +120,8 @@ class LGBMBuilder:
             model = lgb.LGBMRegressor(**params)
             model.fit(X_full_scaled, y_full)
             final_models[f'q_{q}'] = model
-        return {'models': final_models, 'scaler': final_scaler}
+
+        metadata = {
+            'feature_cols': features_for_model
+        }
+        return {'models': final_models, 'scaler': final_scaler, 'metadata': metadata}

@@ -201,6 +201,10 @@ def run_training_for_ticker(
                 joblib.dump(final_artifacts['encoders'], encoders_file)
         else:
             joblib.dump(final_artifacts['models'], model_file)
+            if 'metadata' in final_artifacts:
+                meta_file = model_dir / f"{model_type}_meta_{version_date}.json"
+                with open(meta_file, 'w', encoding='utf-8') as f:
+                    json.dump(final_artifacts['metadata'], f, indent=4)
         
         print(f"SUCCESS: 新版本 ({version_date}) 模型已保存: {model_file.name}")
         

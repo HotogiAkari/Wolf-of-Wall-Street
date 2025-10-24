@@ -184,7 +184,7 @@ hpo_config:
   # --- LGBM 专属 HPO 配置 ---
   lgbm_hpo_config:
     n_trials: 20                # [整数] 覆盖全局设置，为 LGBM 设置 n 轮试验. 
-    hpo_num_eval_folds: 2       # [整数] LGBM 在 HPO 内部评估时使用的 folds 数. 
+    hpo_num_eval_folds: 5       # [整数] LGBM 在 HPO 内部评估时使用的 folds 数. 
     
     # HPO 流程中，LGBM 使用的【固定】参数. 这些参数不参与搜索，但会覆盖 default_model_params 中的同名参数. 
     params:
@@ -207,13 +207,13 @@ hpo_config:
   
   # --- LSTM 专属 HPO 配置 ---
   lstm_hpo_config:
-    n_trials: 10                # [整数] 为 LSTM 设置较少的试验次数，因为它训练速度慢. 
-    hpo_num_eval_folds: 2       # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以加速. 
+    n_trials: 20                # [整数] 为 LSTM 设置较少的试验次数，因为它训练速度慢. 
+    hpo_num_eval_folds: 5       # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以加速. 
     
     # HPO 流程中，LSTM 使用的【固定】参数. 
     params:
       verbose_period: 0           # [整数] HPO 期间关闭 Epoch 日志. 
-      early_stopping_rounds_lstm: 5 # [整数] HPO 期间使用更激进的早停轮次. 
+      early_stopping_rounds_lstm: 15 # [整数] HPO 期间使用更激进的早停轮次. 
       
     # LSTM 的超参数【搜索空间】. 
     # 格式: [类型, ...]. 
@@ -302,13 +302,18 @@ stocks_to_process:
     industry_etf: '159928.SZ'
     # 可以在此处定制 LGBM 模型 (覆盖默认参数)
     lgbm_params:
-      bagging_fraction: 0.6897766956798957
-      feature_fraction: 0.8538697768746747
-      learning_rate: 0.0026150731149229113
-      min_child_samples: 21
-      num_leaves: 21
-      reg_alpha: 0.1566497156552724
-      reg_lambda: 0.7219421446067233
+      bagging_fraction: 0.9375083434979039
+      feature_fraction: 0.77595798993269
+      learning_rate: 0.008524148589354073
+      min_child_samples: 88
+      num_leaves: 51
+      reg_alpha: 0.015652327376092165
+      reg_lambda: 3.403661756226349
+    lstm_params:
+      dropout: 0.2576424753656927
+      learning_rate: 0.0110839281978312
+      units_1: 32
+      units_2: 64
   
   - ticker: '000426.SZ'
     keyword: '兴业矿业'
