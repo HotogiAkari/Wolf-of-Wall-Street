@@ -31,14 +31,13 @@ def _find_latest_artifact_paths(model_dir: Path, model_type: str) -> dict:
         raise FileNotFoundError(f"未在目录 {model_dir} 中找到任何 {model_type.upper()} 的模型文件 (匹配 *{model_suffix})。")
     
     # 3. 通过解析文件名中的日期版本号进行排序，找到最新的文件
-    # 这比依赖文件系统的“修改时间”更稳健、更符合逻辑
     try:
         latest_model_file = sorted(
             model_files, 
             key=lambda f: pd.to_datetime(f.stem.split('_')[-1], format='%Y%m%d')
         )[-1]
     except (IndexError, ValueError):
-        # 如果排序失败（例如文件名格式不符），则回退到使用文件修改时间
+        # 如果排序失败（如文件名格式不符），则回退到使用文件修改时间
         print("WARNNING: 无法按日期版本号对模型文件进行排序，将回退到按文件修改时间。")
         latest_model_file = max(model_files, key=os.path.getctime)
 
@@ -48,7 +47,7 @@ def _find_latest_artifact_paths(model_dir: Path, model_type: str) -> dict:
     except IndexError:
         raise ValueError(f"无法从文件名 '{latest_model_file.name}' 中解析出日期版本。")
 
-    # 5. 根据这个【唯一且正确】的日期版本，构建所有关联构件的精确文件路径
+    # 5. 根据日期版本，构建所有关联构件的精确文件路径
     paths = {
         'model': latest_model_file,
         'scaler': model_dir / f"{model_type}_scaler_{version_date}.pkl",
@@ -61,13 +60,10 @@ def _find_latest_artifact_paths(model_dir: Path, model_type: str) -> dict:
 
 def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use_specific_models: list = None) -> dict:
     """
-    (已最终修复) 为单点预测加载所有必需的、最新版本的构件。
-    - PyTorch 模型结构由其 meta.json 驱动。
-    - 智能地从任何一个可用的 meta.json 文件中加载统一的特征列表。
+    为单点预测加载所有必需的、最新版本的构件。
     """
     print("\n--- 步骤1：加载所有已训练构件 (自动查找最新版本) ---")
     
-    # 提取模块
     Path, os, joblib, torch, json = modules['Path'], __import__('os'), modules['joblib'], modules['torch'], modules['json']
     ModelFuser, RiskManager, LSTMModel, TabTransformerModel = modules['ModelFuser'], modules['RiskManager'], modules['LSTMModel'], modules.get('TabTransformerModel')
     
@@ -85,15 +81,13 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
         try:
             paths = _find_latest_artifact_paths(model_dir, model_type)
             
-            # 加载模型
             if model_type == 'lgbm':
                 artifacts['models'][model_type] = joblib.load(paths['model'])
             elif model_type in ['lstm', 'tabtransformer']:
                 if not paths['meta'].exists(): raise FileNotFoundError(f"元数据文件丢失: {paths['meta']}")
                 with open(paths['meta'], 'r') as f: metadata = json.load(f)
-                
                 model_structure = metadata.get('model_structure')
-                if not model_structure: raise ValueError("元数据中缺少 'model_structure' 信息。")
+                if not model_structure: raise ValueError(f"{model_type.upper()} 元数据中缺少 'model_structure' 信息。")
 
                 if model_type == 'lstm':
                     model_instance = LSTMModel(input_size=metadata['input_size'], **model_structure)
@@ -105,49 +99,39 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
                 model_instance.eval()
                 artifacts['models'][model_type] = model_instance
             
-            # 加载 Scaler
             artifacts['scalers'][model_type] = joblib.load(paths['scaler'])
             print(f"    - SUCCESS: {model_type.upper()} 版本 '{paths['timestamp']}' 已加载。")
-
         except Exception as e:
             print(f"    - ERROR: 加载 {model_type.upper()} 构件失败: {e}")
-            # 即使单个模型失败，也继续加载其他模型
 
     if not artifacts.get('models'):
         raise RuntimeError("未能成功加载任何基础模型，预测流程无法继续。")
 
-    # --- 2. (核心修复) 智能加载训练时的特征列表 ---
+    # --- 2. 智能加载训练时的特征列表 ---
     print("  - INFO: 正在加载训练时使用的特征列表...")
     feature_cols_loaded = False
-    # 定义查找顺序，将最可靠的模型放在前面
-    load_priority = ['lgbm', 'tabtransformer', 'lstm']
-    
+    load_priority = ['lgbm'] + [m for m in models_to_load if m != 'lgbm']
     for model_type_to_try in load_priority:
-        # 只尝试加载那些我们实际需要并且已经成功加载了模型的元数据
         if model_type_to_try in artifacts['models']:
             try:
                 paths = _find_latest_artifact_paths(model_dir, model_type_to_try)
                 if paths['meta'].exists():
-                    with open(paths['meta'], 'r') as f:
-                        meta = json.load(f)
+                    with open(paths['meta'], 'r') as f: meta = json.load(f)
                     feature_cols = meta.get('feature_cols')
                     if feature_cols:
                         artifacts['feature_cols'] = feature_cols
                         print(f"    - SUCCESS: 已从 {model_type_to_try.upper()} 的元数据加载特征列表 ({len(feature_cols)}个)。")
                         feature_cols_loaded = True
-                        break # 成功加载一次后立即跳出循环
-            except Exception:
-                continue # 忽略单个模型的元数据加载失败，继续尝试下一个
+                        break
+            except Exception: continue
             
     if not feature_cols_loaded:
-        raise RuntimeError("未能从任何一个模型的元数据中加载特征列表 (feature_cols)。请确保至少一个模型已成功（重新）训练并生成了包含此信息的 meta.json。")
+        raise RuntimeError("未能从任何一个模型的元数据中加载特征列表 (feature_cols)。")
     
     # --- 3. 加载通用构件 ---
     try:
         artifacts['fuser'] = ModelFuser(target_ticker, config)
-        if not artifacts['fuser'].load(): 
-            print(f"  - WARNNING: 未能加载 ModelFuser，将回退到简单平均。")
-        
+        if not artifacts['fuser'].load(): print(f"  - WARNNING: 未能加载 ModelFuser，将回退到简单平均。")
         db_path = config.get('global_settings', {}).get('order_history_db', 'order_history.db')
         artifacts['risk_manager'] = RiskManager(db_path=db_path)
     except Exception as e:
@@ -557,8 +541,9 @@ def run_all_data_pipeline(config: dict, modules: dict, use_today_as_end_date=Fal
 def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) -> dict:
     """
     (已最终修复) 执行 L3 数据预处理与缓存。
-    - 修复了 PyTorch non-writable tensor 的 UserWarning。
-    - 修复了保存 L3 缓存时可能出现的 'I/O operation on closed file' 错误。
+    - 使用配置文件中定义的目录。
+    - 采用分块保存策略，为每只股票单独保存 L3 缓存，以避免 MemoryError。
+    - 在函数末尾重新加载所有缓存以供当次运行使用。
     """
     print("\n" + "="*80)
     print("=== 工作流阶段 2.1：为模型预处理数据 (L3 缓存) ===")
@@ -574,120 +559,111 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
     default_model_params = config.get('default_model_params', {})
     stocks_to_process = config.get('stocks_to_process', [])
 
+    # --- 从配置中读取 L3 缓存目录 ---
+    l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/processed/_l3_cache_by_stock')
+    L3_CACHE_DIR = Path(l3_cache_dir_path)
+    L3_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    if force_reprocess:
+        print(f"INFO: 已启用强制重建，将清空 L3 缓存目录: {L3_CACHE_DIR}")
+        for f in L3_CACHE_DIR.glob("*.joblib"):
+            f.unlink()
+
+    # --- 循环内处理和分块保存 ---
+    print("INFO: 开始执行预处理流程 (分块保存模式)...\n")
+    if config and stocks_to_process:
+        for stock_info in tqdm(stocks_to_process, desc="正在预处理股票"):
+            ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
+            if not ticker: continue
+            
+            stock_l3_cache_path = L3_CACHE_DIR / f"{ticker}.joblib"
+            if not force_reprocess and stock_l3_cache_path.exists():
+                continue
+            
+            data_path = get_processed_data_path(stock_info, config)
+            if not data_path.exists():
+                print(f"\n错误: 未找到 {keyword} ({ticker}) 的 L2 特征数据。跳过预处理。")
+                continue
+            
+            df = pd.read_pickle(data_path)
+            df.index.name = 'date'
+            folds = walk_forward_split(df, strategy_config)
+            if not folds: continue
+
+            preprocessed_folds_lgbm, preprocessed_folds_lstm, preprocessed_folds_tabtransformer = [], [], []
+            label_col = global_settings.get('label_column', 'label_return')
+            features_for_model = [c for c in df.columns if c != label_col and not c.startswith('future_')]
+
+            for i, (train_df, val_df) in enumerate(folds):
+                y_train, y_val = train_df[label_col], val_df[label_col]
+                X_train_raw, X_val_raw = train_df[features_for_model], val_df[features_for_model]
+                
+                train_mean, train_std = X_train_raw.mean(), X_train_raw.std() + 1e-8
+                X_train_scaled = (X_train_raw - train_mean) / train_std
+                X_val_scaled = (X_val_raw - train_mean) / train_std
+                
+                preprocessed_folds_lgbm.append({'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model})
+
+                use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
+                if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer and encode_categorical_features:
+                    try:
+                        cat_features = default_model_params.get('tabtransformer_params', {}).get('categorical_features', [])
+                        cont_features = [c for c in features_for_model if c not in cat_features]
+                        train_encoded, val_encoded, _ = encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
+                        cat_dims = [int(train_encoded[c].max()) + 1 for c in cat_features]
+                        preprocessed_folds_tabtransformer.append({
+                            'X_train_cont': torch.from_numpy(train_encoded[cont_features].values.copy()).float(), 'X_train_cat': torch.from_numpy(train_encoded[cat_features].values.copy()).long(),
+                            'y_train_tensor': torch.from_numpy(y_train.values.copy()).float().unsqueeze(1), 'X_val_cont': torch.from_numpy(val_encoded[cont_features].values.copy()).float(),
+                            'X_val_cat': torch.from_numpy(val_encoded[cat_features].values.copy()).long(), 'y_val_tensor': torch.from_numpy(y_val.values.copy()).float().unsqueeze(1),
+                            'y_val': y_val, 'cat_dims': cat_dims, 'feature_cols': features_for_model
+                        })
+                    except Exception as e:
+                        print(f"\nERROR (L3 Cache Gen): 为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
+                
+                use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
+                if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
+                    try:
+                        lstm_seq_len = default_model_params.get('lstm_params', {}).get('sequence_length', 60)
+                        if len(X_train_scaled) < lstm_seq_len: continue
+                        train_df_scaled_for_lstm = X_train_scaled.copy(); train_df_scaled_for_lstm[label_col] = y_train
+                        val_df_scaled_for_lstm = X_val_scaled.copy(); val_df_scaled_for_lstm[label_col] = y_val
+                        train_history_for_val = train_df_scaled_for_lstm.iloc[-lstm_seq_len:]
+                        combined_df_for_lstm_val = pd.concat([train_history_for_val, val_df_scaled_for_lstm])
+                        
+                        lstm_builder_for_seq = LSTMBuilder(config)
+                        X_train_seq, y_train_seq, _ = lstm_builder_for_seq._create_sequences(train_df_scaled_for_lstm.reset_index(), features_for_model)
+                        X_val_seq, y_val_seq, dates_val_seq = lstm_builder_for_seq._create_sequences(combined_df_for_lstm_val.reset_index(), features_for_model)
+
+                        if X_train_seq.shape[0] == 0 or X_val_seq.shape[0] == 0: continue
+                        preprocessed_folds_lstm.append({
+                            'X_train_tensor': torch.from_numpy(X_train_seq.copy()).float(), 'y_train_tensor': torch.from_numpy(y_train_seq.copy()).float().unsqueeze(1),
+                            'X_val_tensor': torch.from_numpy(X_val_seq.copy()).float(), 'y_val_tensor': torch.from_numpy(y_val_seq.copy()).float().unsqueeze(1),
+                            'y_val_seq': y_val_seq, 'dates_val_seq': dates_val_seq, 'feature_cols': features_for_model
+                        })
+                    except Exception as e:
+                        print(f"\nERROR (L3 Cache Gen): 为 {keyword} ({ticker}) 的 Fold {i+1} 生成 LSTM 数据时出错: {e}")
+
+            stock_data_cache = {'full_df': df, 'lgbm_folds': preprocessed_folds_lgbm, 'lstm_folds': preprocessed_folds_lstm, 'tabtransformer_folds': preprocessed_folds_tabtransformer}
+            try:
+                joblib.dump(stock_data_cache, stock_l3_cache_path)
+            except Exception as e:
+                tqdm.write(f"ERROR: 为 {keyword} ({ticker}) 保存 L3 缓存时失败: {e}")
+
+    # --- 重新加载所有分块缓存 ---
+    print("\nINFO: 正在从分块文件重新加载所有 L3 缓存到内存...")
     global_data_cache = {}
-    L3_CACHE_PATH = Path(global_settings.get('output_dir', 'data/processed')) / "_preprocessed_cache.joblib"
-
-    if L3_CACHE_PATH.exists() and not force_reprocess:
-        try:
-            global_data_cache = joblib.load(L3_CACHE_PATH)
-            print("SUCCESS: L3 缓存已成功加载到内存。")
-            print("--- 阶段 2.1 成功完成。 ---")
-            return global_data_cache
-        except Exception as e:
-            print(f"WARNNING: 加载 L3 缓存失败: {e}。将重新预处理。")
-    
-    print("INFO: L3 缓存不存在、为空或被强制重建。开始执行预处理流程...\n")
-    if not (config and stocks_to_process): 
-        print("WARNNING: 配置或股票池为空，跳过预处理。")
-        return {}
-
-    for stock_info in tqdm(stocks_to_process, desc="正在预处理股票"):
-        ticker, keyword = stock_info.get('ticker'), stock_info.get('keyword', stock_info.get('ticker'))
+    for stock_info in stocks_to_process:
+        ticker = stock_info.get('ticker')
         if not ticker: continue
-        data_path = get_processed_data_path(stock_info, config)
-        if not data_path.exists():
-            print(f"\n错误: 未找到 {keyword} ({ticker}) 的 L2 特征数据。跳过预处理。")
-            continue
-        
-        df = pd.read_pickle(data_path)
-        df.index.name = 'date'
-        folds = walk_forward_split(df, strategy_config)
-        if not folds:
-            print(f"\n警告: 未能为 {keyword} ({ticker}) 生成任何 Folds。跳过预处理。")
-            continue
+        stock_l3_cache_path = L3_CACHE_DIR / f"{ticker}.joblib"
+        if stock_l3_cache_path.exists():
+            try:
+                global_data_cache[ticker] = joblib.load(stock_l3_cache_path)
+            except Exception as e:
+                print(f"WARNNING: 加载 {ticker} 的 L3 缓存文件时失败: {e}")
 
-        preprocessed_folds_lgbm, preprocessed_folds_lstm, preprocessed_folds_tabtransformer = [], [], []
-        label_col = global_settings.get('label_column', 'label_return')
-        features_for_model = [c for c in df.columns if c != label_col and not c.startswith('future_')]
-
-        for i, (train_df, val_df) in enumerate(folds):
-            y_train, y_val = train_df[label_col], val_df[label_col]
-            X_train_raw, X_val_raw = train_df[features_for_model], val_df[features_for_model]
-            
-            train_mean, train_std = X_train_raw.mean(), X_train_raw.std() + 1e-8
-            X_train_scaled = (X_train_raw - train_mean) / train_std
-            X_val_scaled = (X_val_raw - train_mean) / train_std
-            
-            preprocessed_folds_lgbm.append({
-                'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model
-            })
-
-            use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
-            if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer and encode_categorical_features:
-                try:
-                    cat_features = default_model_params.get('tabtransformer_params', {}).get('categorical_features', [])
-                    cont_features = [c for c in features_for_model if c not in cat_features]
-                    train_encoded, val_encoded, _ = encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
-                    cat_dims = [int(train_encoded[c].max()) + 1 for c in cat_features]
-                    preprocessed_folds_tabtransformer.append({
-                        'X_train_cont': torch.from_numpy(train_encoded[cont_features].values.copy()).float(),
-                        'X_train_cat': torch.from_numpy(train_encoded[cat_features].values.copy()).long(),
-                        'y_train_tensor': torch.from_numpy(y_train.values.copy()).float().unsqueeze(1),
-                        'X_val_cont': torch.from_numpy(val_encoded[cont_features].values.copy()).float(),
-                        'X_val_cat': torch.from_numpy(val_encoded[cat_features].values.copy()).long(),
-                        'y_val_tensor': torch.from_numpy(y_val.values.copy()).float().unsqueeze(1),
-                        'y_val': y_val, 'cat_dims': cat_dims, 'feature_cols': features_for_model
-                    })
-                except Exception as e:
-                    print(f"\nERROR (L3 Cache Gen): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
-            
-            use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
-            if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
-                try:
-                    lstm_seq_len = default_model_params.get('lstm_params', {}).get('sequence_length', 60)
-                    if len(X_train_scaled) < lstm_seq_len: continue
-
-                    train_df_scaled_for_lstm = X_train_scaled.copy(); train_df_scaled_for_lstm[label_col] = y_train
-                    val_df_scaled_for_lstm = X_val_scaled.copy(); val_df_scaled_for_lstm[label_col] = y_val
-                    train_history_for_val = train_df_scaled_for_lstm.iloc[-lstm_seq_len:]
-                    combined_df_for_lstm_val = pd.concat([train_history_for_val, val_df_scaled_for_lstm])
-                    
-                    lstm_builder_for_seq = LSTMBuilder(config)
-                    X_train_seq, y_train_seq, _ = lstm_builder_for_seq._create_sequences(train_df_scaled_for_lstm.reset_index(), features_for_model)
-                    X_val_seq, y_val_seq, dates_val_seq = lstm_builder_for_seq._create_sequences(combined_df_for_lstm_val.reset_index(), features_for_model)
-
-                    if X_train_seq.shape[0] == 0 or X_val_seq.shape[0] == 0: continue
-
-                    preprocessed_folds_lstm.append({
-                        'X_train_tensor': torch.from_numpy(X_train_seq.copy()).float(),
-                        'y_train_tensor': torch.from_numpy(y_train_seq.copy()).float().unsqueeze(1),
-                        'X_val_tensor': torch.from_numpy(X_val_seq.copy()).float(),
-                        'y_val_tensor': torch.from_numpy(y_val_seq.copy()).float().unsqueeze(1),
-                        'y_val_seq': y_val_seq, 'dates_val_seq': dates_val_seq, 'feature_cols': features_for_model
-                    })
-                except Exception as e:
-                    print(f"\nERROR (L3 Cache Gen): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 LSTM 数据时出错: {e}")
-
-        if use_lstm and not preprocessed_folds_lstm:
-            print(f"\n    - FINAL WARNNING (L3 Cache): 最终未能为 {keyword} ({ticker}) 生成任何 LSTM 预处理数据。")
-        
-        global_data_cache[ticker] = {
-            'full_df': df, 'lgbm_folds': preprocessed_folds_lgbm, 
-            'lstm_folds': preprocessed_folds_lstm, 'tabtransformer_folds': preprocessed_folds_tabtransformer
-        }
-    
-    if global_data_cache:
-        try:
-            if not isinstance(L3_CACHE_PATH, Path): L3_CACHE_PATH = Path(L3_CACHE_PATH)
-            L3_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            joblib.dump(global_data_cache, L3_CACHE_PATH)
-            print(f"\nSUCCESS: L3 缓存已成功保存至 {L3_CACHE_PATH}")
-        except Exception as e:
-            print(f"ERROR: 保存 L3 缓存失败: {e}")
-            import traceback
-            traceback.print_exc()
-    else:
-        print("WARNNING: 预处理后未能生成任何有效的缓存数据。")
+    if not global_data_cache:
+        print("WARNNING: 未能成功加载任何 L3 缓存数据。")
 
     print("--- 阶段 2.1 成功完成。 ---")
     return global_data_cache

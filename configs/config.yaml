@@ -8,7 +8,8 @@ global_settings:
   device: 'gpu'                       # 默认计算设备. 'gpu' 会优先使用 CUDA，如果不可用则自动切换到 'cpu'. 'cpu' 则强制使用 CPU. 
   num_cpu_cores_for_data: '4'         # 用于控制 NumPy/SciPy/Scikit-learn 底层计算库（如 MKL, OpenBLAS）使用的线程数
   model_dir: 'data/models'            # 存放所有已训练模型, scaler 和 IC 历史记录的主目录.
-  hpo_log_dir: 'data/hpo_logs'             # HPO 结果日志的存放目录.
+  hpo_log_dir: 'data/hpo_logs'        # HPO 结果日志的存放目录.
+  l3_cache_dir: 'data/l3_cache'       # L3 预处理数据的缓存目录
   data_cache_dir: 'data/data_cache'   # 用于缓存从 API 下载的原始数据的目录，避免重复下载，加快后续运行速度. 
   output_dir: 'data/processed'        # 存放 L2（特征数据）和 L3（预处理数据）缓存的目录. 
   raw_ohlcv_cache_dir: 'raw_ohlcv'    # 在 data_cache_dir 下存放原始 OHLCV 数据的子目录名. 
