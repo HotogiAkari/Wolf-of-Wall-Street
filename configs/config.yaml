@@ -29,55 +29,6 @@ global_settings:
   
   # 定义标签列（即预测目标）在 DataFrame 中的列名. 
   label_column: 'label_return'
-  
-technical_indicators:
-  # === 趋势类指标 ===
-  - name: "ema"                     # 指数移动平均线 (平滑短期波动，反映趋势)
-    params: {"length": 10}
-  - name: "ema"                     # 长期EMA，用于判断长期趋势方向
-    params: {"length": 30}
-  - name: "sma"                     # 简单移动平均线 (趋势基础线)
-    params: {"length": 20}
-  - name: "dema"                    # 双指数移动平均线 (更快响应价格变化)
-    params: {"length": 20}
-  - name: "tema"                    # 三重指数移动平均线 (进一步减少滞后)
-    params: {"length": 20}
-  - name: "adx"                     # 平均趋向指标 (反映趋势强度)
-    params: {"length": 14}
-  # === 动量类指标 ===
-  - name: "rsi"                     # 相对强弱指标 (超买/超卖判断)
-    params: {"length": 14}
-  - name: "stoch"                   # 随机震荡指标 (短期反转信号)
-    params: {"k": 14, "d": 3, "smooth_k": 3}
-  - name: "macd"                    # 移动平均收敛发散指标 (趋势反转)
-    params: {"fast": 12, "slow": 26, "signal": 9}
-  - name: "ppo"                     # 百分比价格振荡器 (MACD 的百分比版本)
-    params: {"fast": 12, "slow": 26}
-  - name: "roc"                     # 价格变化率 (短期涨跌速率)
-    params: {"length": 10}
-  - name: "mom"                     # 动量指标 (衡量价格上升或下降的速度)
-    params: {"length": 10}
-  # === 波动性类指标 ===
-  - name: "bbands"                  # 布林带 (价格波动区间与突破信号)
-    params: {"length": 20, "std": 2}
-  - name: "atr"                     # 平均真实波幅 (衡量市场波动程度)
-    params: {"length": 14}
-  - name: "natr"                    # 归一化平均真实波幅 (波动率标准化)
-    params: {"length": 14}
-  - name: "donchian"                # 唐奇安通道 (高低突破检测)
-    params: {"lower_length": 20, "upper_length": 20}
-  # === 成交量类指标 ===
-  - name: "obv"                     # 能量潮指标 (量价配合确认趋势)
-    params: {}
-  - name: "mfi"                     # 资金流量指标 (带成交量的 RSI)
-    params: {"length": 14}
-  - name: "vwap"                    # 成交量加权平均价 (机构参考价)
-    params: {}
-  # === 市场结构类指标 ===
-  - name: "psar"                    # 抛物线转向指标 (判断趋势反转点)
-    params: {"acceleration": 0.02, "maximum": 0.2}
-  - name: "ichimoku"                # 一目均衡表 (未来支撑阻力与趋势云)
-    params: {"tenkan": 9, "kijun": 26, "senkou": 52}
 
 # --- 2. 策略与数据设定 ---
 # 这部分参数定义了数据范围, 验证方法和特征工程的核心逻辑. 
@@ -98,10 +49,6 @@ strategy_config:
   correlation_threshold: 0.95   # 初步特征筛选的阈值. 如果两个特征的相关性绝对值高于此值，则会移除其中一个，以减少共线性. 
   ffill_limit: 10               # 前向填充缺失值的最大连续天数. 用于处理节假日等造成的少量数据空洞. 
   labeling_method: 'raw_return' # 标签生成方法. 可选值: 'raw_return' (推荐, 默认) 或 'alpha'. raw 使用未来的原始收益率作为预测目标. alpha 使用 Fama-French 三因子模型计算超额收益 (Alpha) 作为预测目标, 需要 Tushare Pro API 的支持. 若获取因子失败,会退回raw.
-  
-  # 模型融合策略 (用于未来实盘预测)
-  fusion_ic_span: 120           # 在计算模型动态权重时，IC 的指数加权移动平均（EWMA）的 span 参数，值越大权重变化越平滑. 
-  fusion_min_weight: 0.2        # 动态融合时，保证任何一个模型的权重不低于此值，增加策略稳定性. 
   
   # 交易与风险 (用于未来实盘)
   signal_threshold: 0.01        # 信号强度（如预测收益率）超过此阈值才考虑开仓. 
@@ -136,17 +83,53 @@ strategy_config:
     - "darkcloudcover"      # 乌云盖顶：顶部反转信号
   # 配置技术指标 (用于 TechnicalIndicatorCalculator), 这是计算金叉/死叉的基础
   technical_indicators:
-    - name: ema
-      params:
-        length: 50
-    - name: ema
-      params:
-        length: 200
-    - name: macd # MACD指标也可以用来做交叉信号
-      params:
-        fast: 12
-        slow: 26
-        signal: 9
+    # === 趋势类指标 ===
+    - name: "ema"                     # 指数移动平均线 (平滑短期波动，反映趋势)
+      params: {"length": 10}
+    - name: "ema"                     # 长期EMA，用于判断长期趋势方向
+      params: {"length": 30}
+    - name: "sma"                     # 简单移动平均线 (趋势基础线)
+      params: {"length": 20}
+    - name: "dema"                    # 双指数移动平均线 (更快响应价格变化)
+      params: {"length": 20}
+    - name: "tema"                    # 三重指数移动平均线 (进一步减少滞后)
+      params: {"length": 20}
+    - name: "adx"                     # 平均趋向指标 (反映趋势强度)
+      params: {"length": 14}
+    # === 动量类指标 ===
+    - name: "rsi"                     # 相对强弱指标 (超买/超卖判断)
+      params: {"length": 14}
+    - name: "stoch"                   # 随机震荡指标 (短期反转信号)
+      params: {"k": 14, "d": 3, "smooth_k": 3}
+    - name: "macd"                    # 移动平均收敛发散指标 (趋势反转)
+      params: {"fast": 12, "slow": 26, "signal": 9}
+    - name: "ppo"                     # 百分比价格振荡器 (MACD 的百分比版本)
+      params: {"fast": 12, "slow": 26}
+    - name: "roc"                     # 价格变化率 (短期涨跌速率)
+      params: {"length": 10}
+    - name: "mom"                     # 动量指标 (衡量价格上升或下降的速度)
+      params: {"length": 10}
+    # === 波动性类指标 ===
+    - name: "bbands"                  # 布林带 (价格波动区间与突破信号)
+      params: {"length": 20, "std": 2}
+    - name: "atr"                     # 平均真实波幅 (衡量市场波动程度)
+      params: {"length": 14}
+    - name: "natr"                    # 归一化平均真实波幅 (波动率标准化)
+      params: {"length": 14}
+    - name: "donchian"                # 唐奇安通道 (高低突破检测)
+      params: {"lower_length": 20, "upper_length": 20}
+    # === 成交量类指标 ===
+    - name: "obv"                     # 能量潮指标 (量价配合确认趋势)
+      params: {}
+    - name: "mfi"                     # 资金流量指标 (带成交量的 RSI)
+      params: {"length": 14}
+    - name: "vwap"                    # 成交量加权平均价 (机构参考价)
+      params: {}
+    # === 市场结构类指标 ===
+    - name: "psar"                    # 抛物线转向指标 (判断趋势反转点)
+      params: {"acceleration": 0.02, "maximum": 0.2}
+    - name: "ichimoku"                # 一目均衡表 (未来支撑阻力与趋势云)
+      params: {"tenkan": 9, "kijun": 26, "senkou": 52}
   # 配置交叉信号 (用于 CrossoverSignalCalculator)
   crossover_signals:
     - name: "ema_50_200"

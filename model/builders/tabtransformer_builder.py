@@ -93,11 +93,11 @@ class TabTransformerBuilder:
             
         cont_features = [c for c in X_df.columns if c not in cat_features]
 
-        X_cont_tensor = torch.from_numpy(X_df[cont_features].values).float()
-        X_cat_tensor = torch.from_numpy(X_df[cat_features].values).long()
+        X_cont_tensor = torch.from_numpy(X_df[cont_features].values.copy()).float()
+        X_cat_tensor = torch.from_numpy(X_df[cat_features].values.copy()).long()
         
         if y_series is not None:
-            y_tensor = torch.from_numpy(y_series.values).float().unsqueeze(1)
+            y_tensor = torch.from_numpy(y_series.values.copy()).float().unsqueeze(1)
             return X_cont_tensor, X_cat_tensor, y_tensor
         return X_cont_tensor, X_cat_tensor
 

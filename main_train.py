@@ -85,10 +85,15 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
         try:
             paths = _find_latest_artifact_paths(model_dir, 'lstm')
             with open(paths['meta'], 'r') as f: metadata = json.load(f)
-            model_structure = metadata.get('model_structure')
-            if not model_structure: raise ValueError("元数据缺少 'model_structure'。")
             
-            lstm_instance = LSTMModel(input_size=metadata['input_size'], **model_structure)
+            model_structure = metadata.get('model_structure')
+            input_size = metadata.get('input_size')
+            
+            if not model_structure or input_size is None: 
+                raise ValueError("元数据缺少 'model_structure' 或 'input_size'。")
+            
+            lstm_instance = LSTMModel(input_size=input_size, **model_structure)
+            
             lstm_instance.load_state_dict(torch.load(paths['model'], map_location=device))
             lstm_instance.to(device).eval()
             
@@ -105,20 +110,13 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
             paths = _find_latest_artifact_paths(model_dir, 'tabtransformer')
             with open(paths['meta'], 'r') as f: metadata = json.load(f)
 
-            # (核心修复) 直接、清晰地从元数据中获取所需参数
             model_structure = metadata.get('model_structure')
             cat_dims = metadata.get('cat_dims')
 
-            # 严格检查所有必需的参数是否存在
             if not model_structure or not cat_dims:
                 raise ValueError("元数据缺少 'model_structure' 或 'cat_dims'。")
-            if 'num_continuous' not in model_structure:
-                 raise ValueError("模型结构元数据中缺少 'num_continuous'。")
 
-            # 使用解包语法清晰地实例化模型
-            # **model_structure 会自动传入 dim, depth, heads 等所有参数
             tt_instance = TabTransformerModel(
-                num_continuous=model_structure['num_continuous'],
                 cat_dims=cat_dims,
                 **model_structure
             )
@@ -298,7 +296,7 @@ def _find_continuous_periods(dates):
 
 def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, full_feature_df: pd.DataFrame, target_ticker: str, keyword: str):
     """
-    (已最终修复与完善) 执行预测、融合、风控、生成报告和可视化。
+    执行预测、融合、风控、生成报告和可视化。
     确保所有模型被预测，融合模型被使用，并且可视化图表完整、正确、美观。
     """
     # --- 1. 提取模块和配置 ---
@@ -330,41 +328,53 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     for model_type, model in artifacts['models'].items():
         try:
             if model_type == 'lgbm':
-                X_scaled = artifacts['scalers']['lgbm'].transform(latest_features.values)
+                X_scaled_df = artifacts['scalers']['lgbm'].transform(latest_features)
                 for name, quantile_model in model.items():
-                    pred = quantile_model.predict(X_scaled)[0]
+                    pred = quantile_model.predict(X_scaled_df)[0]
                     lgbm_preds[name] = pred
                     if name == 'q_0.5':
                         predictions['lgbm'] = pred
                 print(f"  - LGBM 预测值 (中位数): {predictions.get('lgbm', 'N/A'):.6f}")
             
             elif model_type == 'lstm':
-                X_scaled = artifacts['scalers']['lstm'].transform(historical_sequence.values)
-                X_tensor = torch.from_numpy(X_scaled.copy()).unsqueeze(0).float()
+                scaler = artifacts['scalers']['lstm']
+                X_scaled_df = pd.DataFrame(
+                    scaler.transform(historical_sequence),
+                    columns=historical_sequence.columns,
+                    index=historical_sequence.index
+                )
+                
+                # 从修复后的 DataFrame 中获取 NumPy 数组
+                X_tensor = torch.from_numpy(X_scaled_df.values.copy()).unsqueeze(0).float()
+
                 with torch.no_grad():
                     pred = model(X_tensor.to(device)).item()
                 predictions['lstm'] = pred
                 print(f"  - LSTM 预测值 (基于真实序列): {pred:.6f}")
             
             elif model_type == 'tabtransformer':
-                X_df_to_predict = latest_features
+                X_df_to_predict = latest_features.copy()
                 encoders = artifacts['encoders']['tabtransformer']
-                X_df_encoded = X_df_to_predict.copy()
+                scaler = artifacts['scalers']['tabtransformer']
+                
                 cat_features = config.get('default_model_params',{}).get('tabtransformer_params',{}).get('categorical_features', [])
+                cont_features = [c for c in train_feature_cols if c not in cat_features]
+                
                 for col in cat_features:
                     known_classes = set(encoders[col].classes_)
-                    X_df_encoded[col] = X_df_encoded[col].astype(str).apply(lambda x: x if x in known_classes else '<unknown>')
-                    X_df_encoded[col] = encoders[col].transform(X_df_encoded[col])
+                    X_df_to_predict[col] = X_df_to_predict[col].astype(str).apply(lambda x: x if x in known_classes else '<unknown>')
+                    X_df_to_predict[col] = encoders[col].transform(X_df_to_predict[col])
                 
-                X_scaled_np = artifacts['scalers']['tabtransformer'].transform(X_df_encoded.values)
-                X_df_scaled = pd.DataFrame(X_scaled_np, columns=X_df_encoded.columns, index=X_df_encoded.index)
+                X_df_to_predict[cont_features] = scaler.transform(X_df_to_predict[cont_features])
                 
-                cont_features = [c for c in train_feature_cols if c not in cat_features]
-                X_cont = torch.from_numpy(X_df_scaled[cont_features].values.copy()).float()
-                X_cat = torch.from_numpy(X_df_scaled[cat_features].values.copy()).long()
+                # 4. 准备 Tensors
+                X_cont_tensor = torch.from_numpy(X_df_to_predict[cont_features].values.copy()).float().to(device)
+                X_cat_tensor = torch.from_numpy(X_df_to_predict[cat_features].values.copy()).long().to(device)
                 
+                # 5. 预测
                 with torch.no_grad():
-                    pred = model(X_cont.to(device), X_cat.to(device)).item()
+                    pred = model(X_cont_tensor, X_cat_tensor).item()
+                
                 predictions['tabtransformer'] = pred
                 print(f"  - TabTransformer 预测值: {pred:.6f}")
         
@@ -401,19 +411,29 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     print(f"    - 最终预测信号 (已平滑): {fused_prediction:.6f}")
     
     # --- 5. 计算涨跌概率 ---
+    
     print("\n--- 步骤5：计算涨跌概率 ---")
     prob_up, prob_down = None, None
-    if lgbm_preds and all(k in lgbm_preds for k in ['q_0.05', 'q_0.5', 'q_0.95']):
+    '''
+    if lgbm_preds and all(k in lgbm_preds for k in ['q_0.05', 'q_0.95']):
         try:
             from scipy.stats import norm
-            lower, upper, mu = lgbm_preds['q_0.05'], lgbm_preds['q_0.95'], lgbm_preds['q_0.5']
-            sigma = (upper - lower) / (2 * 1.645)
+            lower_lgbm, upper_lgbm = lgbm_preds['q_0.05'], lgbm_preds['q_0.95']
+            
+            mu = fused_prediction
+            
+            sigma = (upper_lgbm - lower_lgbm) / (2 * 1.645)
+            if sigma <= 1e-6: # 如果宽度过窄或为负，则使用一个小的默认值
+                print(f"  - WARNNING: 计算出的 Sigma ({sigma:.4f}) 无效. 将使用默认的波动率。")
+                sigma = np.std(list(predictions.values())) if len(predictions) > 1 else 0.01
+
             if sigma > 1e-6:
                 dist = norm(loc=mu, scale=sigma)
                 prob_up, prob_down = 1 - dist.cdf(0), dist.cdf(0)
-                print(f"  - INFO: 计算得到上涨概率 {prob_up:.2%}, 下跌概率 {prob_down:.2%}")
+                print(f"  - INFO: 基于融合信号(mu={mu:.4f})和LGBM波动(sigma={sigma:.4f})计算得到上涨概率 {prob_up:.2%}, 下跌概率 {prob_down:.2%}")
         except Exception as e:
             print(f"  - WARNNING: 计算涨跌概率时失败: {e}")
+        '''
 
     # --- 6. 风险审批与决策 ---
     print("\n--- 步骤6：风险审批与决策输出 ---")
@@ -563,7 +583,7 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
         from model.builders.model_fuser import ModelFuser
         from model.builders.lgbm_builder import LGBMBuilder
         from model.builders.lstm_builder import LSTMBuilder, LSTMModel
-        from model.builders.tabtransformer_builder import TabTransformerBuilder
+        from model.builders.tabtransformer_builder import TabTransformerBuilder, TabTransformerModel
         from model.builders.utils import encode_categorical_features
         from risk_management.risk_manager import RiskManager
         from backtest.backtester import VectorizedBacktester
@@ -590,6 +610,7 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
         'LGBMBuilder': LGBMBuilder,
         'LSTMBuilder': LSTMBuilder, 'LSTMModel': LSTMModel, 
         'TabTransformerBuilder': TabTransformerBuilder,
+        'TabTransformerModel': TabTransformerModel,
         'RiskManager': RiskManager, 'VectorizedBacktester': VectorizedBacktester,
         'encode_categorical_features': encode_categorical_features,
         'run_backtrader_backtest': run_backtrader_backtest,
@@ -644,14 +665,12 @@ def run_all_data_pipeline(config: dict, modules: dict, use_today_as_end_date=Fal
 
 def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) -> dict:
     """
-    (已最终修复) 执行 L3 数据预处理与缓存。
+    执行 L3 数据预处理与缓存。
     - 使用配置文件中定义的目录。
     - 采用分块保存策略，为每只股票单独保存 L3 缓存，以避免 MemoryError。
     - 在函数末尾重新加载所有缓存以供当次运行使用。
     """
-    print("\n" + "="*80)
     print("=== 工作流阶段 2.1：为模型预处理数据 (L3 缓存) ===")
-    print("="*80)
     
     # 提取模块和配置
     Path, joblib, tqdm, pd, torch, np = modules['Path'], modules['joblib'], modules['tqdm'], modules['pd'], modules['torch'], __import__('numpy')
@@ -768,36 +787,20 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 joblib.dump(stock_data_cache, stock_l3_cache_path)
             except Exception as e:
                 tqdm.write(f"ERROR: 为 {keyword} ({ticker}) 保存 L3 缓存时失败: {e}")
-
-    # --- 重新加载所有分块缓存 ---
-    print("\nINFO: 正在从分块文件重新加载所有 L3 缓存到内存...")
-    global_data_cache = {}
-    for stock_info in stocks_to_process:
-        ticker = stock_info.get('ticker')
-        if not ticker: continue
-        stock_l3_cache_path = L3_CACHE_DIR / f"{ticker}.joblib"
-        if stock_l3_cache_path.exists():
-            try:
-                global_data_cache[ticker] = joblib.load(stock_l3_cache_path)
-            except Exception as e:
-                print(f"WARNNING: 加载 {ticker} 的 L3 缓存文件时失败: {e}")
-
-    if not global_data_cache:
-        print("WARNNING: 未能成功加载任何 L3 缓存数据。")
-
+    print("--- INFO: L3 缓存文件已在磁盘上准备就绪。 ---")
     print("--- 阶段 2.1 成功完成。 ---")
-    return global_data_cache
 
-def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
+def run_hpo_train(config: dict, modules: dict):
     """
     执行超参数优化 (对应 Train.ipynb 阶段 2.2)。
     """
     print("=== 阶段 2.2：超参数优化 ===")
 
-    # 提取所需模块和配置
+    # --- 1. 提取所需模块和配置 ---
     pd = modules['pd']
     Path = modules['Path']
     yaml = modules['yaml']
+    joblib = modules['joblib'] # <-- 新增
     run_hpo_for_ticker = modules['run_hpo_for_ticker']
 
     hpo_config = config.get('hpo_config', {})
@@ -808,7 +811,12 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
     
     models_for_hpo = hpo_config.get('models_for_hpo', [])
     hpo_tickers = hpo_config.get('tickers_for_hpo', [])
+
+    # --- 2. (核心修改) 获取 L3 缓存目录路径 ---
+    l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/l3_cache')
+    L3_CACHE_DIR = Path(l3_cache_dir_path)
     
+    # --- 3. 前置检查 ---
     if not models_for_hpo:
         print("INFO: 在配置文件 hpo_config.models_for_hpo 中未指定要优化的模型，跳过此步骤。")
         print("--- 阶段 2.2 已跳过。 ---")
@@ -819,13 +827,14 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
         print("--- 阶段 2.2 已跳过。 ---")
         return
 
-    if not global_data_cache:
-        print("ERROR: 全局数据缓存 (global_data_cache) 为空。请确保阶段 2.1 已成功运行。")
+    if not L3_CACHE_DIR.exists():
+        print(f"ERROR: L3 缓存目录 '{L3_CACHE_DIR}' 不存在。请确保阶段 2.1 已成功运行。")
         print("--- 阶段 2.2 执行失败。 ---")
         return
 
     print(f"--- INFO: 开始为模型 {models_for_hpo} 和股票 {hpo_tickers} 进行超参数优化 ---\n")
     
+    # --- 4. 主循环 ---
     for model_type_for_hpo in models_for_hpo:
         print(f"开始为模型 [{model_type_for_hpo.upper()}] 进行 HPO")
         
@@ -841,6 +850,7 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
             
             keyword = stock_info.get('keyword', ticker)
 
+            # 检查该模型是否对该股票启用
             use_model = True
             if model_type_for_hpo != 'lgbm':
                  is_enabled_flag = f"use_{model_type_for_hpo}_globally"
@@ -851,15 +861,23 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
                 print(f"\nINFO: {keyword} ({ticker}) 已配置为不使用 {model_type_for_hpo.upper()}，跳过 HPO。")
                 continue
 
-            if ticker not in global_data_cache:
-                print(f"ERROR: 预处理数据缓存中未找到 {keyword} ({ticker}) 的数据。跳过。")
+            # --- 5. (核心修改) Just-in-Time 加载 L3 缓存 ---
+            stock_l3_cache_path = L3_CACHE_DIR / f"{ticker}.joblib"
+            if not stock_l3_cache_path.exists():
+                print(f"ERROR: 预处理数据缓存中未找到 {keyword} ({ticker}) 的数据文件。跳过 HPO。")
+                continue
+            
+            try:
+                cached_stock_data = joblib.load(stock_l3_cache_path)
+            except Exception as e:
+                print(f"ERROR: 加载 {keyword} ({ticker}) 的 L3 缓存失败: {e}。跳过 HPO。")
                 continue
 
             folds_key = f"{model_type_for_hpo}_folds"
-            if model_type_for_hpo == 'tabtransformer' and (folds_key not in global_data_cache[ticker] or not global_data_cache[ticker][folds_key]):
+            if model_type_for_hpo == 'tabtransformer' and (folds_key not in cached_stock_data or not cached_stock_data[folds_key]):
                 folds_key = 'lgbm_folds'
             
-            all_preprocessed_folds = global_data_cache[ticker].get(folds_key, [])
+            all_preprocessed_folds = cached_stock_data.get(folds_key, [])
             if not all_preprocessed_folds:
                 print(f"WARNNING: 缓存中未找到 {keyword} ({ticker}) 的 '{model_type_for_hpo}' 预处理数据。跳过 HPO。")
                 continue
@@ -882,6 +900,7 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
             if best_params and best_value is not None:
                 hpo_results_list.append({'ticker': ticker, 'keyword': keyword, 'best_score': best_value, **best_params})
         
+        # --- 6. HPO 结果聚合与保存 (这部分逻辑完全不变) ---
         if hpo_results_list:
             hpo_log_dir_name = global_settings.get('hpo_log_dir', 'hpo_logs')
             hpo_log_dir = Path(hpo_log_dir_name)
@@ -904,10 +923,8 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
             param_cols_original = [c for c in hpo_results_list[0].keys() if c not in ['ticker', 'keyword', 'best_score']]
             final_hpo_params = final_best_df[param_cols_original].median().to_dict()
             
-            # --- (核心修复) ---
             model_search_space = hpo_config.get(f'{model_type_for_hpo}_hpo_config', {}).get('search_space', {})
             
-            # 找出所有被定义为 'int' 或 'categorical' 的参数，因为 categorical 的结果也应该是整数
             params_to_round = [
                 param for param, definition in model_search_space.items() 
                 if isinstance(definition, list) and len(definition) > 0 and definition[0] in ('int', 'categorical')
@@ -946,7 +963,7 @@ def run_hpo_train(config: dict, modules: dict, global_data_cache: dict):
 
     print("--- 阶段 2.2 成功完成。 ---")
 
-def run_all_models_train(config: dict, modules: dict, global_data_cache: dict, 
+def run_all_models_train(config: dict, modules: dict, 
                      force_retrain_base=False, 
                      force_retrain_fuser=False, 
                      run_fusion=True) -> list:
@@ -955,32 +972,61 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict,
     """
     print("=== 工作流阶段 2.3：训练所有模型 ===")
 
-    # 提取所需模块和配置
-    tqdm, run_training_for_ticker, ModelFuser = modules['tqdm'], modules['run_training_for_ticker'], modules['ModelFuser']
-    global_settings, strategy_config, default_model_params, stocks_to_process = config.get('global_settings', {}), config.get('strategy_config', {}), config.get('default_model_params', {}), config.get('stocks_to_process', [])
+    # --- 1. 提取所需模块和配置 ---
+    tqdm = modules['tqdm']
+    run_training_for_ticker = modules['run_training_for_ticker']
+    ModelFuser = modules['ModelFuser']
+    Path = modules['Path'] # <-- 新增
+    joblib = modules['joblib'] # <-- 新增
 
+    global_settings = config.get('global_settings', {})
+    strategy_config = config.get('strategy_config', {})
+    default_model_params = config.get('default_model_params', {})
+    stocks_to_process = config.get('stocks_to_process', [])
+    
+    # --- 2. (核心修改) 获取 L3 缓存目录路径 ---
+    l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/l3_cache')
+    L3_CACHE_DIR = Path(l3_cache_dir_path)
+
+    # --- 3. 前置检查 ---
     all_ic_history = []
-    if not (config and stocks_to_process and global_data_cache):
-        print("ERROR: 配置或数据缓存为空，无法训练模型。")
+    if not (config and stocks_to_process):
+        print("ERROR: 配置为空或股票池为空，无法训练模型。")
+        return all_ic_history
+        
+    if not L3_CACHE_DIR.exists():
+        print(f"ERROR: L3 缓存目录 '{L3_CACHE_DIR}' 不存在。请确保阶段 2.1 已成功运行。")
+        print("--- 阶段 2.3 执行失败。 ---")
         return all_ic_history
 
     models_to_train = global_settings.get('models_to_train', [])
     
-    # --- 单一的股票主循环 ---
+    # --- 4. 单一的股票主循环 ---
     stock_iterator = tqdm(stocks_to_process, desc="处理股票模型")
 
     for stock_info in stock_iterator:
         ticker = stock_info.get('ticker')
-        if not ticker or ticker not in global_data_cache:
+        if not ticker:
+            continue
+        
+        # --- 5. (核心修改) Just-in-Time 加载 L3 缓存 ---
+        stock_l3_cache_path = L3_CACHE_DIR / f"{ticker}.joblib"
+        if not stock_l3_cache_path.exists():
+            tqdm.write(f"\nERROR: 未找到 {ticker} 的 L3 缓存文件，跳过该股票的训练。")
+            continue
+        try:
+            cached_stock_data = joblib.load(stock_l3_cache_path)
+        except Exception as e:
+            tqdm.write(f"\nERROR: 加载 {ticker} 的L3缓存失败: {e}。跳过该股票的训练。")
             continue
         
         keyword = stock_info.get('keyword', ticker)
         stock_iterator.set_description(f"正在处理 {keyword} ({ticker})")
         
-        cached_stock_data = global_data_cache[ticker]
+        # 从加载的数据中获取 full_df
         full_df = cached_stock_data['full_df']
         
-        # --- 2.3.1 基础模型训练 ---
+        # --- 6. 基础模型训练 (后续逻辑不变，只是数据源变了) ---
         print(f"\n--- 2.3.1 为 {keyword} ({ticker}) 训练基础模型 ---")
         base_models_succeeded_count = 0
         for model_type in models_to_train:
@@ -993,7 +1039,6 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict,
                     use_model = stock_info.get(is_enabled_per_stock_flag, global_settings.get(is_enabled_flag, True))
                 if not use_model:
                     print(f"INFO: {keyword} ({ticker}) 已配置为不使用 {model_type.upper()}, 跳过训练。")
-                    # 即使跳过，也算作一种“成功”，以便不阻止融合
                     base_models_succeeded_count += 1
                     continue
 
@@ -1006,6 +1051,7 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict,
                     print(f"WARNNING: 未找到 {keyword} ({ticker}) 的 '{model_type}' 预处理 folds。跳过训练。")
                     continue
 
+                # 注意这里，我们将 full_df 注入到 run_config 中
                 run_config = {
                     'global_settings': global_settings, 'strategy_config': strategy_config,
                     'default_model_params': default_model_params, 'stocks_to_process': [stock_info],
@@ -1028,7 +1074,7 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict,
             except Exception as e:
                 print(f"\nERROR: 为 {keyword} ({ticker}) 训练 {model_type.upper()} 模型时发生严重错误: {e}")
         
-        # --- 2.3.5 融合模型训练 ---
+        # --- 7. 融合模型训练 (逻辑完全不变) ---
         if run_fusion and base_models_succeeded_count == len(models_to_train):
             print(f"\n--- 2.3.5 为 {keyword} ({ticker}) 训练融合模型 ---")
             try:
@@ -1300,16 +1346,13 @@ def run_complete_training_workflow(
     try:
         run_all_data_pipeline(config, modules, use_today_as_end_date=use_today_as_end_date)
         
-        global_data_cache = run_preprocess_l3_cache(config, modules, force_reprocess=force_reprocess_l3)
-        if not global_data_cache:
-            print("ERROR: L3 数据缓存为空，无法继续。工作流终止。")
-            return
-
+        run_preprocess_l3_cache(config, modules, force_reprocess=force_reprocess_l3)
+        
         if run_hpo:
-            run_hpo_train(config, modules, global_data_cache)
+            run_hpo_train(config, modules)
         
         all_ic_history = run_all_models_train(
-            config, modules, global_data_cache, 
+            config, modules, 
             force_retrain_base=force_retrain_base, 
             force_retrain_fuser=force_retrain_fuser,
             run_fusion=run_fusion
