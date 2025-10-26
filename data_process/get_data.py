@@ -12,9 +12,9 @@ import yfinance as yf
 from pathlib import Path
 from typing import Dict, Optional
 from tqdm.autonotebook import tqdm
-from data_process import data_contracts
-from data_process import feature_calculators
-from data_process.feature_postprocessors import run_all_feature_postprocessors
+from data_process.data_contracts import DataValidator
+from data_process.feature_calculators import run_all_feature_calculators
+from data_process.feature_postprocessors import run_all_feature_postprocessors, run_prediction_postprocessors
 
 # --- 全局 API 实例 ---
 pro: Optional['ts.ProApi'] = None
@@ -204,7 +204,14 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: P
         
     return df[['open', 'high', 'low', 'close', 'volume']]
 
-def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_dir: Path, display_name: str = None) -> Optional[pd.DataFrame]:
+def _get_index_data_bs(
+    index_code: str, 
+    start_date: str, 
+    end_date: str, 
+    cache_dir: Path, 
+    config: dict,
+    display_name: str = None
+) -> Optional[pd.DataFrame]:
     """
     优先从 Baostock 获取指数数据。
     如果失败，则根据映射表动态调用正确的成分股查询接口，在本地合成指数。
@@ -217,16 +224,17 @@ def _get_index_data_bs(index_code: str, start_date: str, end_date: str, cache_di
         print(f"    - SUCCESS: 已直接从 Baostock 获取到 '{name_to_show}' ({index_code}) 的数据。")
         return index_df
 
+    # --- 整合回退开关逻辑 ---
+    strategy_cfg = config.get('strategy_config', {})
+    fallback_on_index_fail = strategy_cfg.get('fallback_on_index_fail', True)
+
+    if not fallback_on_index_fail:
+        print(f"    - ERROR: 无法直接获取指数 '{name_to_show}' ({index_code})。根据配置，已中止操作。")
+        return None
+
     print(f"    - 警告: 无法直接获取指数 '{name_to_show}' ({index_code})。将尝试在本地合成等权重指数...")
     try:
-        constituent_api_map_str = {
-            "sh.000300": "query_hs300_stocks",
-            "sz.399300": "query_hs300_stocks",
-            "sh.000905": "query_zz500_stocks",
-            "sz.399905": "query_zz500_stocks",
-            "sh.000016": "query_sz50_stocks",
-            "sz.399006": "query_cyb_stocks",
-        }
+        constituent_api_map_str = config.get('baostock_index_constituent_map', {})
 
         api_func_name = constituent_api_map_str.get(index_code)
         if api_func_name is None:
@@ -374,7 +382,7 @@ def _get_fama_french_factors(start_date: str, end_date: str) -> Optional[pd.Data
         print(f"    - ERROR: 从 Tushare 获取因子数据失败: {e}"); return None
 
 def _get_macroeconomic_data_cn(start_date: str, end_date: str, config: dict) -> Optional[pd.DataFrame]:
-    """[TS] (可选) 从 Tushare 获取中国宏观经济指标。"""
+    """从 Tushare 获取中国宏观经济指标。"""
     if pro is None: return None
     print("  - 正在尝试从 Tushare 获取中国宏观经济数据...")
     try:
@@ -402,7 +410,7 @@ def _get_macroeconomic_data_cn(start_date: str, end_date: str, config: dict) -> 
 
 def _get_market_sentiment_data_ak(start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
     """
-    (新增) 使用 akshare 获取中国市场的情绪指标，如中国波指(iVIX)。
+    使用 akshare 获取中国市场的情绪指标，如中国波指(iVIX)。
     """
     print("--- 正在获取市场情绪数据 (恐慌指数) ---")
     cache_file = cache_dir / f"market_sentiment_{start_date}_{end_date}.pkl"
@@ -440,12 +448,10 @@ def _get_market_sentiment_data_ak(start_date: str, end_date: str, cache_dir: Pat
 def get_full_feature_df(
     ticker: str, 
     config: Dict,
-    # 直接接收计算好的日期字符串
     start_date_str: str,
     end_date_str: str,
     keyword: str = None, 
     prediction_mode: bool = False, 
-    # 接收所有预先生成的全局 DataFrame
     market_breadth_df: Optional[pd.DataFrame] = None,
     external_market_df: Optional[pd.DataFrame] = None,
     market_sentiment_df: Optional[pd.DataFrame] = None,
@@ -453,81 +459,92 @@ def get_full_feature_df(
     factors_df: Optional[pd.DataFrame] = None
 ) -> Optional[pd.DataFrame]:
     """
-    为单个股票执行完整的特征生成流程。
-    需要所有全局性数据和运行日期都已预先确定并通过参数传入。
-    只负责获取与该股票直接相关的行情数据、合并数据并执行计算。
+    (已最终修复) 为单个股票执行完整的特征生成流程。
     """
     display_name = keyword if keyword else ticker
-    print(f"\n--- 正在为 {display_name} ({ticker}) 生成特征 ---")
+    if prediction_mode:
+        print(f"\n--- 正在为 {display_name} ({ticker}) 生成【预测用】最新特征 ---")
+    else:
+        print(f"\n--- 正在为 {display_name} ({ticker}) 生成【训练用】历史特征 ---")
     
-    # 合并全局、策略和个股的配置，以个股配置为最高优先级
     global_settings = config.get('global_settings', {})
     strategy_config = config.get('strategy_config', {})
     stock_info = next((s for s in config.get('stocks_to_process', []) if s['ticker'] == ticker), {})
     run_config = {**global_settings, **strategy_config, **stock_info}
 
-    # 直接使用传入的日期
     print(f"  - 数据窗口: {start_date_str} to {end_date_str}")
     
-    # --- 1. 数据获取 (只获取个股相关数据) ---
+    # --- 1. 数据获取 ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
     
     df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
     if df is None:
-        raise ValueError(f"为 {display_name} ({ticker}) 获取基础 OHLCV 数据失败，返回了 None.")
+        raise ValueError(f"为 {display_name} ({ticker}) 获取基础 OHLCV 数据失败。")
 
     industry_ticker = run_config.get('industry_etf')
-    industry_df = _get_index_data_bs(industry_ticker, start_date_str, end_date_str, cache_dir, display_name=f"{keyword}的行业指数")
-    
+    if industry_ticker:
+        industry_df = _get_index_data_bs(industry_ticker, start_date_str, end_date_str, cache_dir, config, display_name=f"{keyword}的行业指数")
+    else:
+        industry_df = None
+
     benchmark_ticker = run_config.get('benchmark_ticker')
-    benchmark_df = _get_index_data_bs(benchmark_ticker, start_date_str, end_date_str, cache_dir, display_name="基准指数")
+    if benchmark_ticker:
+        benchmark_df = _get_index_data_bs(benchmark_ticker, start_date_str, end_date_str, cache_dir, config, display_name="基准指数")
+    else:
+        benchmark_df = None
 
     # --- 2. 数据合并 ---
     if market_breadth_df is not None:
         df = df.join(market_breadth_df, how='left')
+    if external_market_df is not None:
+        df = df.join(external_market_df, how='left')
     if market_sentiment_df is not None:
         df = df.join(market_sentiment_df, how='left')
-        df[market_sentiment_df.columns] = df[market_sentiment_df.columns].ffill()
     if macro_df is not None:
         df = pd.merge_asof(df, macro_df, left_index=True, right_index=True, direction='backward')
-    
     if benchmark_df is not None:
-        df = df.join(benchmark_df['close'].rename('benchmark_close'), how='left')
+        df = df.join(benchmark_df[['close']].rename(columns={'close': 'benchmark_close'}), how='left')
     if industry_df is not None:
-        df = df.join(industry_df['close'].rename('industry_close'), how='left')
+        df = df.join(industry_df[['close']].rename(columns={'close': 'industry_close'}), how='left')
         
-    # --- 3. 特征计算 ---
-    run_config_with_api = {**run_config, 'tushare_pro_instance': pro, 'ticker': ticker}
+    # --- 3. 核心特征计算 ---
+    run_config_with_api = {**run_config, 'tushare_pro_instance': globals().get('pro'), 'ticker': ticker}
     extra_data_for_calc = {'external_market_df': external_market_df}
-    df = feature_calculators.run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
+    df = run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
     
-    # --- 4. 特征后处理 ---
-    extra_data_for_post = {
-        'factors_df': factors_df,
-        'ticker': ticker,
-        'keyword': display_name
-    }
-    df = run_all_feature_postprocessors(df, run_config, **extra_data_for_post)
+    # --- 4. 根据模式选择不同的后处理流程 ---
+    extra_data_for_post = {'ticker': ticker, 'keyword': display_name}
+    
+    if prediction_mode:
+        print("INFO: 预测模式，将运行简化的后处理流程 (跳过特征选择和标签生成)。")
+        df = run_prediction_postprocessors(df, run_config, **extra_data_for_post)
+    else: # 训练模式
+        print("INFO: 训练模式，将运行完整的后处理流程 (包括特征选择和标签生成)。")
+        extra_data_for_post['factors_df'] = factors_df
+        df = run_all_feature_postprocessors(df, run_config, **extra_data_for_post)
         
     # --- 5. 数据清洗和校验 ---
-    ffill_limit = run_config.get("ffill_limit", 5)
-    df.ffill(inplace=True, limit=ffill_limit)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    label_col = run_config.get('label_column')
-
-    if label_col in df.columns:
+    if prediction_mode:
+        ffill_limit = run_config.get("ffill_limit", 5)
+        feature_cols_pred = [c for c in df.columns if not c.startswith('label_') and not c.startswith('future_')]
+        df[feature_cols_pred] = df[feature_cols_pred].ffill(limit=ffill_limit)
+    else:
+        label_col = run_config.get('label_column')
+        if label_col not in df.columns:
+            raise KeyError(f"关键错误！标签列 '{label_col}' 在后处理后不存在。")
         df.dropna(subset=[label_col], inplace=True)
-    
-    feature_cols = [col for col in df.columns if col != label_col and not col.startswith('future_')]
-    df.dropna(subset=feature_cols, inplace=True)
+        feature_cols_train = [col for col in df.columns if col != label_col and not col.startswith('future_')]
+        df.dropna(subset=feature_cols_train, inplace=True)
     
     if df.empty:
-        raise ValueError(f"为 {display_name} ({ticker}) 处理的数据在 dropna 操作后变为空。请检查数据质量或时间范围。")
+        raise ValueError(f"为 {display_name} ({ticker}) 处理的数据在清洗后变为空。")
     
-    validator = data_contracts.DataValidator(run_config)
-    if not validator.validate_schema(df):
-        raise ValueError(f"{display_name} ({ticker}) 的最终数据未能通过 Schema 校验。请查看上方的详细错误日志。")
+    if not prediction_mode:
+        validator = DataValidator(run_config)
+        if not validator.validate_schema(df):
+            raise ValueError(f"{display_name} ({ticker}) 的最终数据未能通过 Schema 校验。")
         
     print(f"--- SUCCESS: 成功为 {display_name} ({ticker}) 生成特征. 维度: {df.shape} ---")
     return df

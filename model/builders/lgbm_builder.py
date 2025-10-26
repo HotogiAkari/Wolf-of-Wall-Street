@@ -1,4 +1,4 @@
-# 文件路径: model_builders/lgbm_builder.py (最终简化版)
+# 文件路径: model_builders/lgbm_builder.py
 
 import warnings
 import pandas as pd
@@ -93,7 +93,6 @@ class LGBMBuilder:
             eval_df = pd.DataFrame({"y_pred": preds, "y_true": y_val.values, "date": y_val.index})
             oof_df = eval_df[['date', 'y_true', 'y_pred']]
 
-            # --- 核心修正 2：将 IC 计算也放入一个警告抑制块中 ---
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 try:
@@ -102,7 +101,6 @@ class LGBMBuilder:
                         ic_df = pd.DataFrame([{'date': eval_df['date'].max(), 'rank_ic': fold_ic}])
                 except Exception: 
                     pass
-            # ---
                 
         return {'models': quantile_models}, ic_df, oof_df, fold_stats
 

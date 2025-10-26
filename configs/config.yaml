@@ -355,6 +355,14 @@ visualization_settings:
   # ICIR 对比图的 Y 轴显示范围
   icir_plot_ylim: [-2.0, 2.0]
 
+baostock_index_constituent_map:
+  "sh.000300": "query_hs300_stocks"
+  "sz.399300": "query_hs300_stocks"
+  "sh.000905": "query_zz500_stocks"
+  "sz.399905": "query_zz500_stocks"
+  "sh.000016": "query_sz50_stocks"
+  "sz.399006": "query_cyb_stocks"
+
 # --- 7. 应用层设定 ---
 application_settings:
   prophet_target_ticker: '600519.SH'    # 用于单点预测的目标股票

@@ -166,14 +166,12 @@ class RawReturnLabelCalculator(FeaturePostprocessor):
 
 class CorrelationSelector(FeaturePostprocessor):
     """
-    (修复后) 根据相关性剔除冗余特征。
+    根据相关性剔除冗余特征。
     此版本会明确地将标签列从相关性分析中排除。
     """
     def process(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         if self.config.get('global_settings', {}).get('verbose', True):
             print("  - [Post-processing] Running: Correlation Selector...")
-        
-        # --- (修改开始) ---
         
         # 1. 合并配置，以便轻松访问所有参数
         run_config = {**self.config.get('global_settings', {}), **self.config.get('strategy_config', {})}
@@ -196,8 +194,6 @@ class CorrelationSelector(FeaturePostprocessor):
             col for col in numeric_df.columns 
             if col not in features_to_exclude and not col.startswith('future_')
         ]
-        
-        # --- (修改结束) ---
 
         if not features_to_check:
             if self.config.get('global_settings', {}).get('verbose', True):
@@ -241,7 +237,7 @@ def run_all_feature_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> 
         processor = processor_class(config)
         df_copy = processor.process(df_copy, **kwargs)
 
-    # --- 2. (已重构) 根据配置明确选择标签计算器 ---
+    # --- 2. 根据配置明确选择标签计算器 ---
     strategy_cfg = config.get('strategy_config', {})
     labeling_method = strategy_cfg.get('labeling_method', 'raw_return') 
     
@@ -267,4 +263,24 @@ def run_all_feature_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> 
         # (核心修复点) 将 kwargs 传递给 RawReturnLabelCalculator 的 process 方法
         df_copy = label_calculator.process(df_copy, **kwargs)
         
+    return df_copy
+
+def run_prediction_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:
+    """
+    只运行预测时必需的后处理器 (例如平稳化)，
+    跳过所有会改变特征集的步骤 (如 CorrelationSelector)。
+    """
+    df_copy = df.copy()
+    
+    # 在这里只注册预测时也需要运行的处理器
+    PREDICTION_POSTPROCESSORS = [
+        StationarityTransformer,
+    ]
+    
+    for processor_class in PREDICTION_POSTPROCESSORS:
+        processor = processor_class(config)
+        df_copy = processor.process(df_copy, **kwargs)
+        
+    # 注意：这里绝对不能有标签生成和特征筛选
+    
     return df_copy

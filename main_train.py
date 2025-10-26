@@ -30,30 +30,20 @@ def _find_latest_artifact_paths(model_dir: Path, model_type: str) -> dict:
     if not model_files:
         raise FileNotFoundError(f"未在目录 {model_dir} 中找到任何 {model_type.upper()} 的模型文件 (匹配 *{model_suffix})。")
     
-    # 3. 通过解析文件名中的日期版本号进行排序，找到最新的文件
     try:
-        latest_model_file = sorted(
-            model_files, 
-            key=lambda f: pd.to_datetime(f.stem.split('_')[-1], format='%Y%m%d')
-        )[-1]
-    except (IndexError, ValueError):
-        # 如果排序失败（如文件名格式不符），则回退到使用文件修改时间
-        print("WARNNING: 无法按日期版本号对模型文件进行排序，将回退到按文件修改时间。")
-        latest_model_file = max(model_files, key=os.path.getctime)
-
-    # 4. 从最终确定的最新文件名中提取日期版本
-    try:
-        version_date = latest_model_file.stem.split('_')[-1]
+        # 按文件名中最后一个 '_' 后面的部分（即日期版本）进行排序
+        latest_model_file = sorted(model_files, key=lambda f: f.stem.split('_')[-1])[-1]
     except IndexError:
-        raise ValueError(f"无法从文件名 '{latest_model_file.name}' 中解析出日期版本。")
+        raise ValueError(f"无法从模型文件名中解析出日期版本以进行排序。")
 
-    # 5. 根据日期版本，构建所有关联构件的精确文件路径
+    version_date = latest_model_file.stem.split('_')[-1]
+    
     paths = {
         'model': latest_model_file,
         'scaler': model_dir / f"{model_type}_scaler_{version_date}.pkl",
         'meta': model_dir / f"{model_type}_meta_{version_date}.json",
         'encoders': model_dir / f"{model_type}_encoders_{version_date}.pkl",
-        'timestamp': version_date # 实际是 version_date
+        'timestamp': version_date
     }
     
     return paths
@@ -61,51 +51,100 @@ def _find_latest_artifact_paths(model_dir: Path, model_type: str) -> dict:
 def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use_specific_models: list = None) -> dict:
     """
     为单点预测加载所有必需的、最新版本的构件。
+    通过文件名对模型版本进行排序，并在加载后进行一致性检查。
     """
     print("\n--- 步骤1：加载所有已训练构件 (自动查找最新版本) ---")
     
-    Path, os, joblib, torch, json = modules['Path'], __import__('os'), modules['joblib'], modules['torch'], modules['json']
+    Path, joblib, torch, json = modules['Path'], modules['joblib'], modules['torch'], modules['json']
     ModelFuser, RiskManager, LSTMModel, TabTransformerModel = modules['ModelFuser'], modules['RiskManager'], modules['LSTMModel'], modules.get('TabTransformerModel')
     
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     artifacts = {'models': {}, 'scalers': {}, 'encoders': {}, 'feature_cols': None}
     model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / target_ticker
-    stock_info = next((s for s in config.get('stocks_to_process', []) if s['ticker'] == target_ticker), {})
-
+    
     models_to_load = use_specific_models or config.get('global_settings', {}).get('models_to_train', [])
     if not models_to_load: 
         raise ValueError("没有指定要加载的模型。")
 
-    # --- 1. 分别加载每种模型的构件 ---
-    for model_type in models_to_load:
-        print(f"  - 正在加载 {model_type.upper()} 的构件...")
-        try:
-            paths = _find_latest_artifact_paths(model_dir, model_type)
-            
-            if model_type == 'lgbm':
-                artifacts['models'][model_type] = joblib.load(paths['model'])
-            elif model_type in ['lstm', 'tabtransformer']:
-                if not paths['meta'].exists(): raise FileNotFoundError(f"元数据文件丢失: {paths['meta']}")
-                with open(paths['meta'], 'r') as f: metadata = json.load(f)
-                model_structure = metadata.get('model_structure')
-                if not model_structure: raise ValueError(f"{model_type.upper()} 元数据中缺少 'model_structure' 信息。")
+    loaded_versions = {}
 
-                if model_type == 'lstm':
-                    model_instance = LSTMModel(input_size=metadata['input_size'], **model_structure)
-                elif model_type == 'tabtransformer' and TabTransformerModel:
-                    model_instance = TabTransformerModel(num_continuous=metadata['input_size_cont'], cat_dims=metadata['cat_dims'], **model_structure)
-                    if paths['encoders'].exists(): artifacts['encoders'][model_type] = joblib.load(paths['encoders'])
-                
-                model_instance.load_state_dict(torch.load(paths['model']))
-                model_instance.eval()
-                artifacts['models'][model_type] = model_instance
-            
-            artifacts['scalers'][model_type] = joblib.load(paths['scaler'])
-            print(f"    - SUCCESS: {model_type.upper()} 版本 '{paths['timestamp']}' 已加载。")
+    # --- 1. 分别加载每种模型的构件 ---
+    if 'lgbm' in models_to_load:
+        print(f"  - 正在加载 LGBM 的构件...")
+        try:
+            paths = _find_latest_artifact_paths(model_dir, 'lgbm')
+            artifacts['models']['lgbm'] = joblib.load(paths['model'])
+            artifacts['scalers']['lgbm'] = joblib.load(paths['scaler'])
+            loaded_versions['lgbm'] = paths['timestamp']
+            print(f"    - SUCCESS: LGBM 版本 '{paths['timestamp']}' 已加载。")
         except Exception as e:
-            print(f"    - ERROR: 加载 {model_type.upper()} 构件失败: {e}")
+            print(f"    - ERROR: 加载 LGBM 构件失败: {e}")
+
+    if 'lstm' in models_to_load:
+        print(f"  - 正在加载 LSTM 的构件...")
+        try:
+            paths = _find_latest_artifact_paths(model_dir, 'lstm')
+            with open(paths['meta'], 'r') as f: metadata = json.load(f)
+            model_structure = metadata.get('model_structure')
+            if not model_structure: raise ValueError("元数据缺少 'model_structure'。")
+            
+            lstm_instance = LSTMModel(input_size=metadata['input_size'], **model_structure)
+            lstm_instance.load_state_dict(torch.load(paths['model'], map_location=device))
+            lstm_instance.to(device).eval()
+            
+            artifacts['models']['lstm'] = lstm_instance
+            artifacts['scalers']['lstm'] = joblib.load(paths['scaler'])
+            loaded_versions['lstm'] = paths['timestamp']
+            print(f"    - SUCCESS: LSTM 版本 '{paths['timestamp']}' 已加载。")
+        except Exception as e:
+            print(f"    - ERROR: 加载 LSTM 构件失败: {e}")
+
+    if 'tabtransformer' in models_to_load and TabTransformerModel:
+        print(f"  - 正在加载 TABTRANSFORMER 的构件...")
+        try:
+            paths = _find_latest_artifact_paths(model_dir, 'tabtransformer')
+            with open(paths['meta'], 'r') as f: metadata = json.load(f)
+
+            # (核心修复) 直接、清晰地从元数据中获取所需参数
+            model_structure = metadata.get('model_structure')
+            cat_dims = metadata.get('cat_dims')
+
+            # 严格检查所有必需的参数是否存在
+            if not model_structure or not cat_dims:
+                raise ValueError("元数据缺少 'model_structure' 或 'cat_dims'。")
+            if 'num_continuous' not in model_structure:
+                 raise ValueError("模型结构元数据中缺少 'num_continuous'。")
+
+            # 使用解包语法清晰地实例化模型
+            # **model_structure 会自动传入 dim, depth, heads 等所有参数
+            tt_instance = TabTransformerModel(
+                num_continuous=model_structure['num_continuous'],
+                cat_dims=cat_dims,
+                **model_structure
+            )
+            
+            tt_instance.load_state_dict(torch.load(paths['model'], map_location=device))
+            tt_instance.to(device).eval()
+
+            artifacts['models']['tabtransformer'] = tt_instance
+            artifacts['scalers']['tabtransformer'] = joblib.load(paths['scaler'])
+            if paths['encoders'].exists(): artifacts['encoders']['tabtransformer'] = joblib.load(paths['encoders'])
+            loaded_versions['tabtransformer'] = paths['timestamp']
+            print(f"    - SUCCESS: TabTransformer 版本 '{paths['timestamp']}' 已加载。")
+        except Exception as e:
+            print(f"    - ERROR: 加载 TABTRANSFORMER 构件失败: {e}")
 
     if not artifacts.get('models'):
         raise RuntimeError("未能成功加载任何基础模型，预测流程无法继续。")
+
+    # --- 2. 版本一致性检查 ---
+    if len(set(loaded_versions.values())) > 1:
+        print("!!! FATAL WARNING: 检测到加载了不同版本的模型构件 !!!")
+        for model_type, version in loaded_versions.items():
+            print(f"  - {model_type.upper()}: 版本 {version}")
+        print("  - 这将导致预测结果不一致和不可靠。请检查您的模型文件。")
+        print("  - 建议清理模型目录，或只保留一套版本匹配的模型文件。")
+        raise RuntimeError("加载了不一致的模型版本，流程中止以保证安全。")
 
     # --- 2. 智能加载训练时的特征列表 ---
     print("  - INFO: 正在加载训练时使用的特征列表...")
@@ -240,81 +279,92 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
     print("--- 步骤2成功完成：最新特征数据已生成。 ---")
     return full_feature_df
 
+def _find_continuous_periods(dates):
+    """
+    从一个 DatetimeIndex 中找出所有连续的时间段。
+    """
+    from itertools import groupby
+    from operator import itemgetter
+    
+    if dates.empty:
+        return []
+        
+    periods = []
+    # toordinal() 将日期转换为整数，便于计算连续性
+    for _, g in groupby(enumerate(dates), lambda ix: ix[0] - ix[1].toordinal()):
+        group = list(map(itemgetter(1), g))
+        periods.append((group[0], group[-1]))
+    return periods
+
 def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, full_feature_df: pd.DataFrame, target_ticker: str, keyword: str):
     """
-    (辅助函数) 执行预测、融合、风控、生成报告和可视化。
+    (已最终修复与完善) 执行预测、融合、风控、生成报告和可视化。
+    确保所有模型被预测，融合模型被使用，并且可视化图表完整、正确、美观。
     """
     # --- 1. 提取模块和配置 ---
     pd, torch, np = modules['pd'], modules['torch'], __import__('numpy')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # --- 2. (核心修复) 特征对齐 ---
-    # a. 从构件中加载【训练时】最终使用的特征列表
+    # --- 2. 特征对齐与数据准备 ---
     train_feature_cols = artifacts.get('feature_cols')
     if not train_feature_cols:
-        raise RuntimeError("未能从构件中加载训练时的特征列表 (feature_cols)。请确保重新训练模型以生成包含此信息的 meta.json。")
-        
-    # b. 检查当前生成的特征数据是否包含了所有必需的特征
-    current_cols = set(full_feature_df.columns)
-    missing_features = set(train_feature_cols) - current_cols
-    if missing_features:
-        raise RuntimeError(f"预测时生成的特征数据缺少了训练时的关键特征: {missing_features}。这可能意味着特征计算逻辑已发生变化。")
-
-    # c. 从当前数据中，精确地、按顺序地挑选出训练时使用的特征
-    print(f"  - INFO: 成功加载训练时的 {len(train_feature_cols)} 个特征。将进行特征对齐...")
-    feature_df_aligned = full_feature_df[train_feature_cols]
-
-    # --- 3. 准备预测所需的最新数据片段 ---
-    lstm_seq_len = config.get('default_model_params',{}).get('lstm_params',{}).get('sequence_length', 60)
+        raise RuntimeError("未能从构件中加载训练时的特征列表 (feature_cols)。")
     
+    missing_features = set(train_feature_cols) - set(full_feature_df.columns)
+    if missing_features:
+        raise RuntimeError(f"预测时生成的特征数据缺少了训练时的关键特征: {missing_features}。")
+    
+    feature_df_aligned = full_feature_df[train_feature_cols]
+    
+    lstm_seq_len = config.get('default_model_params',{}).get('lstm_params',{}).get('sequence_length', 60)
     if len(feature_df_aligned) < lstm_seq_len:
         raise ValueError(f"对齐后的数据长度 ({len(feature_df_aligned)}) 不足以满足 LSTM 序列长度 ({lstm_seq_len})。")
-
-    # 使用已对齐的数据
+    
     historical_sequence = feature_df_aligned.iloc[-lstm_seq_len:]
     latest_features = feature_df_aligned.iloc[-1:]
     
-    # --- 4. 独立模型预测 ---
+    # --- 3. 独立模型预测 ---
     print("\n--- 步骤3：生成独立模型预测 ---")
-    predictions = {}
+    predictions, lgbm_preds = {}, {}
     
     for model_type, model in artifacts['models'].items():
         try:
             if model_type == 'lgbm':
-                X_scaled = artifacts['scalers']['lgbm'].transform(latest_features)
-                pred = model['q_0.5'].predict(X_scaled)[0]
-                predictions['lgbm'] = pred
-                print(f"  - LGBM 预测值 (中位数): {pred:.6f}")
+                X_scaled = artifacts['scalers']['lgbm'].transform(latest_features.values)
+                for name, quantile_model in model.items():
+                    pred = quantile_model.predict(X_scaled)[0]
+                    lgbm_preds[name] = pred
+                    if name == 'q_0.5':
+                        predictions['lgbm'] = pred
+                print(f"  - LGBM 预测值 (中位数): {predictions.get('lgbm', 'N/A'):.6f}")
             
             elif model_type == 'lstm':
-                X_scaled = artifacts['scalers']['lstm'].transform(historical_sequence)
-                X_tensor = torch.from_numpy(X_scaled).unsqueeze(0).float()
+                X_scaled = artifacts['scalers']['lstm'].transform(historical_sequence.values)
+                X_tensor = torch.from_numpy(X_scaled.copy()).unsqueeze(0).float()
                 with torch.no_grad():
-                    pred = model(X_tensor).item()
+                    pred = model(X_tensor.to(device)).item()
                 predictions['lstm'] = pred
                 print(f"  - LSTM 预测值 (基于真实序列): {pred:.6f}")
             
             elif model_type == 'tabtransformer':
-                # TabTransformer 使用单行数据进行预测
                 X_df_to_predict = latest_features
-                
-                # a. 使用训练时保存的编码器
                 encoders = artifacts['encoders']['tabtransformer']
                 X_df_encoded = X_df_to_predict.copy()
                 cat_features = config.get('default_model_params',{}).get('tabtransformer_params',{}).get('categorical_features', [])
                 for col in cat_features:
-                    X_df_encoded[col] = encoders[col].transform(X_df_encoded[col].astype(str))
+                    known_classes = set(encoders[col].classes_)
+                    X_df_encoded[col] = X_df_encoded[col].astype(str).apply(lambda x: x if x in known_classes else '<unknown>')
+                    X_df_encoded[col] = encoders[col].transform(X_df_encoded[col])
                 
-                # b. 标准化
-                X_scaled = artifacts['scalers']['tabtransformer'].transform(X_df_encoded)
-                X_df_scaled = pd.DataFrame(X_scaled, columns=X_df_encoded.columns, index=X_df_encoded.index)
+                X_scaled_np = artifacts['scalers']['tabtransformer'].transform(X_df_encoded.values)
+                X_df_scaled = pd.DataFrame(X_scaled_np, columns=X_df_encoded.columns, index=X_df_encoded.index)
                 
-                # c. 准备 Tensors
                 cont_features = [c for c in train_feature_cols if c not in cat_features]
-                X_cont = torch.from_numpy(X_df_scaled[cont_features].values).float()
-                X_cat = torch.from_numpy(X_df_scaled[cat_features].values).long()
-
+                X_cont = torch.from_numpy(X_df_scaled[cont_features].values.copy()).float()
+                X_cat = torch.from_numpy(X_df_scaled[cat_features].values.copy()).long()
+                
                 with torch.no_grad():
-                    pred = model(X_cont.to(artifacts['fuser'].device), X_cat.to(artifacts['fuser'].device)).item()
+                    pred = model(X_cont.to(device), X_cat.to(device)).item()
                 predictions['tabtransformer'] = pred
                 print(f"  - TabTransformer 预测值: {pred:.6f}")
         
@@ -324,84 +374,138 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     if not predictions:
         raise RuntimeError("未能生成任何有效的模型预测。")
 
-    # --- 5. 模型融合 ---
+    # --- 4. 模型融合 ---
     print("\n--- 步骤4：融合模型预测 ---")
     fuser_instance = artifacts['fuser']
     fused_prediction = None
-    
     if fuser_instance and fuser_instance.is_trained:
         preds_dict_all = {f'pred_{mt}': p for mt, p in predictions.items()}
-        # 确保只传入 Fuser 训练时用到的模型预测
         try:
-            fuser_inputs = {k: v for k, v in preds_dict_all.items() if k in fuser_instance.meta_model.feature_names_in_}
-            if len(fuser_inputs) == len(fuser_instance.meta_model.feature_names_in_):
+            required_fuser_inputs = set(fuser_instance.meta_model.feature_names_in_)
+            available_preds = set(preds_dict_all.keys())
+            
+            if required_fuser_inputs.issubset(available_preds):
+                fuser_inputs = {k: preds_dict_all[k] for k in required_fuser_inputs}
                 fused_prediction = fuser_instance.predict(fuser_inputs)
                 print(f"  - SUCCESS: ModelFuser 已成功融合 {list(fuser_inputs.keys())}。")
             else:
-                print("  - WARNNING: 提供的模型预测不全，无法使用 ModelFuser。将回退到简单平均。")
+                 print(f"  - WARNNING: 缺少 ModelFuser 所需的预测: {required_fuser_inputs - available_preds}。将回退。")
         except AttributeError:
-             print("  - WARNNING: ModelFuser 的 meta_model 缺少 feature_names_in_ 属性。将回退到简单平均。")
-
-
+             print("  - WARNNING: ModelFuser 的 meta_model 属性异常。将回退。")
     if fused_prediction is None:
-        fused_prediction = np.mean(list(predictions.values()))
-        print(f"  - INFO: 已回退到对所有可用预测进行简单平均。")
-    
+        if predictions:
+            fused_prediction = np.mean(list(predictions.values()))
+            print(f"  - INFO: 已回退到对所有可用预测进行简单平均。")
+        else:
+            fused_prediction = 0
     print(f"    - 最终预测信号 (已平滑): {fused_prediction:.6f}")
     
-    # --- 6. 风险审批与决策输出 ---
-    print("\n--- 步骤5：风险审批与决策输出 ---")
+    # --- 5. 计算涨跌概率 ---
+    print("\n--- 步骤5：计算涨跌概率 ---")
+    prob_up, prob_down = None, None
+    if lgbm_preds and all(k in lgbm_preds for k in ['q_0.05', 'q_0.5', 'q_0.95']):
+        try:
+            from scipy.stats import norm
+            lower, upper, mu = lgbm_preds['q_0.05'], lgbm_preds['q_0.95'], lgbm_preds['q_0.5']
+            sigma = (upper - lower) / (2 * 1.645)
+            if sigma > 1e-6:
+                dist = norm(loc=mu, scale=sigma)
+                prob_up, prob_down = 1 - dist.cdf(0), dist.cdf(0)
+                print(f"  - INFO: 计算得到上涨概率 {prob_up:.2%}, 下跌概率 {prob_down:.2%}")
+        except Exception as e:
+            print(f"  - WARNNING: 计算涨跌概率时失败: {e}")
+
+    # --- 6. 风险审批与决策 ---
+    print("\n--- 步骤6：风险审批与决策输出 ---")
     risk_manager = artifacts['risk_manager']
     signal_threshold = config.get('strategy_config', {}).get('signal_threshold', 0.005)
     direction_str = 'BUY' if fused_prediction > signal_threshold else ('SELL' if fused_prediction < -signal_threshold else 'HOLD')
     trade_price = latest_features['close'].iloc[0]
-
     decision_approved, order_id, decision_notes = False, None, "信号强度未达到开仓阈值。"
-
     if direction_str in ['BUY', 'SELL']:
-        decision_approved, order_id = risk_manager.approve_trade(
-            ticker=target_ticker, direction=direction_str, price=trade_price,
-            latest_market_data=full_feature_df, config=config
-        )
+        decision_approved, order_id = risk_manager.approve_trade(ticker=target_ticker, direction=direction_str, price=trade_price, latest_market_data=full_feature_df, config=config)
         decision_notes = "信号通过所有风险检查。" if decision_approved else "信号被 RiskManager 拒绝（详情见上方日志）。"
     
-    # --- 6. 生成决策报告 ---
-    print("\n--- 最终决策报告 ---")
     final_direction = "看涨 (BUY)" if direction_str == 'BUY' else ("看跌 (SELL)" if direction_str == 'SELL' else "中性 (HOLD)")
     trade_action = "【批准开仓】" if decision_approved else ("【信号被拒】" if direction_str in ['BUY', 'SELL'] else "【无需操作】")
-
+    
+    # --- 7. 生成最终决策报告 ---
+    print("\n--- 最终决策报告 ---")
     report_data = [
         ('股票名称', f"{keyword} ({target_ticker})"), ('决策生成时间', pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')),
         ('信号方向', final_direction), ('信号强度', f"{fused_prediction:+.4%}"),
+        ('上涨概率', f"{prob_up:.2%}" if prob_up is not None else 'N/A'),
+        ('下跌概率', f"{prob_down:.2%}" if prob_down is not None else 'N/A'),
         ('交易动作', f"{trade_action} {final_direction if decision_approved else ''}"), ('备注', decision_notes),
         ('关联订单ID', order_id or 'N/A'),
     ]
     report_df = pd.DataFrame(report_data, columns=['项目', '内容']).set_index('项目')
     print(report_df.to_string())
     
-    # --- 7. (新增) 简单可视化 ---
-    print("\n--- 步骤6：特征可视化 ---")
+    # --- 8. 可视化 ---
+    print("\n--- 步骤7：决策支持可视化 ---")
     try:
-        import matplotlib.pyplot as plt
-        import seaborn as sns
+        import matplotlib.pyplot as plt; import seaborn as sns; from matplotlib.patches import Patch
         
-        key_features_to_plot = ['close', 'rsi_14', 'volatility_expansion_ratio', 'regime_is_uptrend']
-        plot_features = [f for f in key_features_to_plot if f in full_feature_df.columns]
+        plt.style.use('seaborn-v0_8-darkgrid')
+        try: plt.rcParams['font.sans-serif'] = ['SimHei']; plt.rcParams['axes.unicode_minus'] = False
+        except: print("WARNNING: 未能设置中文字体 'SimHei'。")
         
-        if plot_features:
-            plot_df = full_feature_df[plot_features].tail(100)
-            fig, axes = plt.subplots(len(plot_features), 1, figsize=(15, 3 * len(plot_features)), sharex=True)
-            fig.suptitle(f'{keyword} ({target_ticker}) - 关键特征观察', fontsize=16)
-            for i, feature in enumerate(plot_features):
-                ax = axes[i] if len(plot_features) > 1 else axes
-                plot_df[feature].plot(ax=ax)
-                ax.set_ylabel(feature)
-                ax.axvline(plot_df.index[-1], color='r', linestyle='--', linewidth=2, label='当前预测点')
-                ax.legend()
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
-            plt.show()
-    except ImportError:
-        print("WARNNING: Matplotlib 未安装，跳过可视化。")
+        plot_df = full_feature_df.tail(200).copy()
+        rsi_col_name = next((c for c in plot_df.columns if 'rsi' in c.lower()), None)
+        for col in ['close', 'volume'] + ([rsi_col_name] if rsi_col_name else []):
+            plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
+
+        fig, axes = plt.subplots(3, 1, figsize=(18, 14), sharex=True, gridspec_kw={'height_ratios': [5, 2, 2]})
+        fig.suptitle(f'{keyword} ({target_ticker}) - 交易决策支持图表', fontsize=20, fontweight='bold')
+        
+        ax1, ax2, ax3 = axes[0], axes[1], axes[2]
+        
+        # 图 1: 价格 & 预测
+        ax1.set_ylabel('价格', fontsize=12)
+        ax1.plot(plot_df.index, plot_df['close'], color='black', linewidth=1.5, zorder=5)
+        
+        last_price, last_date = plot_df['close'].iloc[-1], plot_df.index[-1]
+        pred_horizon = config.get('strategy_config', {}).get('labeling_horizon', 45)
+        future_date = last_date + pd.DateOffset(days=pred_horizon)
+        
+        handles = [plt.Line2D([0], [0], color='black', lw=2, label='收盘价')]
+        
+        if lgbm_preds and all(k in lgbm_preds for k in ['q_0.05', 'q_0.5', 'q_0.95']):
+            ax1.fill_between([last_date, future_date], [last_price, last_price * (1+lgbm_preds['q_0.05'])], [last_price, last_price * (1+lgbm_preds['q_0.95'])], color='skyblue', alpha=0.5, zorder=2)
+            handles.append(Patch(facecolor='skyblue', alpha=0.5, label='90% 置信区间 (LGBM)'))
+        
+        model_colors = {'lgbm': 'dodgerblue', 'lstm': 'orange', 'tabtransformer': 'green'}
+        for mt, p_val in predictions.items():
+            ax1.plot([last_date, future_date], [last_price, last_price * (1+p_val)], color=model_colors.get(mt, 'grey'), linestyle='--', linewidth=2, zorder=6)
+            handles.append(plt.Line2D([0], [0], color=model_colors.get(mt, 'grey'), linestyle='--', label=f'{mt.upper()} 中位数预测 ({p_val:+.2%})'))
+
+        ax1.plot([last_date, future_date], [last_price, last_price * (1+fused_prediction)], color='red', linestyle='--', marker='o', markersize=8, linewidth=2.5, zorder=7)
+        handles.append(plt.Line2D([0], [0], color='red', linestyle='--', marker='o', label=f'最终融合预测 ({fused_prediction:+.2%})'))
+        
+        ax1.legend(handles=handles, loc='best'); ax1.grid(True, linestyle='--', alpha=0.6)
+        
+        prob_up_str, prob_down_str = (f"{p:.2%}" if p is not None else "N/A" for p in (prob_up, prob_down))
+        text_box_content = (f"最终信号: {fused_prediction:+.2%}\n方向: {final_direction}\n行动: {trade_action}\n上涨概率: {prob_up_str}\n下跌概率: {prob_down_str}")
+        props = dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.8)
+        ax1.text(0.02, 0.98, text_box_content, transform=ax1.transAxes, fontsize=12, verticalalignment='top', bbox=props, zorder=10)
+
+        # 图 2: RSI
+        if rsi_col_name and not plot_df[rsi_col_name].isnull().all():
+            ax2.plot(plot_df.index, plot_df[rsi_col_name], color='purple')
+            ax2.axhline(70, color='r', linestyle='--', lw=1); ax2.axhline(30, color='g', linestyle='--', lw=1)
+            ax2.legend([f'{rsi_col_name.upper()}', '超买线 (70)', '超卖线 (30)'], loc='upper left')
+        ax2.set_ylabel('RSI'); ax2.grid(True, linestyle='--', alpha=0.6)
+        
+        # 图 3: 成交量
+        if 'volume' in plot_df.columns and not plot_df['volume'].isnull().all():
+            ax3.bar(plot_df.index, plot_df['volume'], color='grey', width=0.6)
+        ax3.set_ylabel('成交量'); ax3.grid(True, linestyle='--', alpha=0.6)
+        ax3.set_xlabel('日期', fontsize=12)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.show()
+    except Exception as e:
+        print(f"WARNNING: 绘图时发生错误: {e}"); import traceback; traceback.print_exc()
 
 def _encode_categorical_features(df_train: pd.DataFrame, df_val: pd.DataFrame, cat_features: list) -> tuple:
     """
@@ -602,24 +706,40 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 X_train_scaled = (X_train_raw - train_mean) / train_std
                 X_val_scaled = (X_val_raw - train_mean) / train_std
                 
+                # --- LGBM 数据准备 ---
                 preprocessed_folds_lgbm.append({'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model})
 
+                # --- TabTransformer 数据准备 ---
                 use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
-                if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer and encode_categorical_features:
+                if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer:
                     try:
                         cat_features = default_model_params.get('tabtransformer_params', {}).get('categorical_features', [])
+                        if not cat_features:
+                            print(f"WARNNING: 为 TabTransformer 配置的 categorical_features 为空，跳过。")
+                            continue
+
+                        # 对已经标准化过的数据进行类别特征编码
+                        train_encoded, val_encoded, encoders = _encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
+                        
+                        cat_dims = [len(encoders[col].classes_) for col in cat_features]
+                        
                         cont_features = [c for c in features_for_model if c not in cat_features]
-                        train_encoded, val_encoded, _ = encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
-                        cat_dims = [int(train_encoded[c].max()) + 1 for c in cat_features]
+
                         preprocessed_folds_tabtransformer.append({
-                            'X_train_cont': torch.from_numpy(train_encoded[cont_features].values.copy()).float(), 'X_train_cat': torch.from_numpy(train_encoded[cat_features].values.copy()).long(),
-                            'y_train_tensor': torch.from_numpy(y_train.values.copy()).float().unsqueeze(1), 'X_val_cont': torch.from_numpy(val_encoded[cont_features].values.copy()).float(),
-                            'X_val_cat': torch.from_numpy(val_encoded[cat_features].values.copy()).long(), 'y_val_tensor': torch.from_numpy(y_val.values.copy()).float().unsqueeze(1),
-                            'y_val': y_val, 'cat_dims': cat_dims, 'feature_cols': features_for_model
+                            'X_train_cont': torch.from_numpy(train_encoded[cont_features].values.copy()).float(),
+                            'X_train_cat': torch.from_numpy(train_encoded[cat_features].values.copy()).long(),
+                            'y_train_tensor': torch.from_numpy(y_train.values.copy()).float().unsqueeze(1),
+                            'X_val_cont': torch.from_numpy(val_encoded[cont_features].values.copy()).float(),
+                            'X_val_cat': torch.from_numpy(val_encoded[cat_features].values.copy()).long(),
+                            'y_val_tensor': torch.from_numpy(y_val.values.copy()).float().unsqueeze(1),
+                            'y_val': y_val, 
+                            'cat_dims': cat_dims, 
+                            'feature_cols': features_for_model
                         })
                     except Exception as e:
-                        print(f"\nERROR (L3 Cache Gen): 为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
+                        print(f"\nERROR (L3 Cache Gen): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
                 
+                # --- LSTM 数据准备 ---
                 use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
                 if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
                     try:
@@ -839,16 +959,15 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict,
     tqdm, run_training_for_ticker, ModelFuser = modules['tqdm'], modules['run_training_for_ticker'], modules['ModelFuser']
     global_settings, strategy_config, default_model_params, stocks_to_process = config.get('global_settings', {}), config.get('strategy_config', {}), config.get('default_model_params', {}), config.get('stocks_to_process', [])
 
-    # --- 2.3.1 基础模型训练 ---
-    print("\n--- 2.3.1 基础模型训练 ---")
     all_ic_history = []
     if not (config and stocks_to_process and global_data_cache):
-        print("ERROR: 配置或数据缓存为空，无法训练基础模型。")
+        print("ERROR: 配置或数据缓存为空，无法训练模型。")
         return all_ic_history
 
-    # 从配置中读取要训练的模型列表
-    models_to_train = global_settings.get('models_to_train', ['lgbm', 'lstm'])
-    stock_iterator = tqdm(stocks_to_process, desc="训练基础模型")
+    models_to_train = global_settings.get('models_to_train', [])
+    
+    # --- 单一的股票主循环 ---
+    stock_iterator = tqdm(stocks_to_process, desc="处理股票模型")
 
     for stock_info in stock_iterator:
         ticker = stock_info.get('ticker')
@@ -861,72 +980,69 @@ def run_all_models_train(config: dict, modules: dict, global_data_cache: dict,
         cached_stock_data = global_data_cache[ticker]
         full_df = cached_stock_data['full_df']
         
+        # --- 2.3.1 基础模型训练 ---
+        print(f"\n--- 2.3.1 为 {keyword} ({ticker}) 训练基础模型 ---")
+        base_models_succeeded_count = 0
         for model_type in models_to_train:
-            # 检查该模型是否被全局或个股配置启用
-            use_model_flag_name = f"use_{model_type}_globally"
-            use_model_per_stock_flag_name = f"use_{model_type}"
-            
-            # 默认启用 lgbm (因为它没有开关)
-            is_enabled = True
-            if model_type != 'lgbm':
-                 is_enabled = stock_info.get(use_model_per_stock_flag_name, global_settings.get(use_model_flag_name, True))
+            try:
+                # 检查该模型是否被全局或个股配置启用
+                use_model = True
+                if model_type != 'lgbm':
+                    is_enabled_flag = f"use_{model_type}_globally"
+                    is_enabled_per_stock_flag = f"use_{model_type}"
+                    use_model = stock_info.get(is_enabled_per_stock_flag, global_settings.get(is_enabled_flag, True))
+                if not use_model:
+                    print(f"INFO: {keyword} ({ticker}) 已配置为不使用 {model_type.upper()}, 跳过训练。")
+                    # 即使跳过，也算作一种“成功”，以便不阻止融合
+                    base_models_succeeded_count += 1
+                    continue
 
-            if not is_enabled:
-                print(f"\nINFO: {keyword} ({ticker}) 已配置为不使用 {model_type.upper()}, 跳过训练。")
-                continue
+                folds_key = f"{model_type}_folds"
+                if model_type == 'tabtransformer' and (folds_key not in cached_stock_data or not cached_stock_data[folds_key]):
+                    folds_key = 'lgbm_folds'
+                
+                preprocessed_folds = cached_stock_data.get(folds_key)
+                if not preprocessed_folds:
+                    print(f"WARNNING: 未找到 {keyword} ({ticker}) 的 '{model_type}' 预处理 folds。跳过训练。")
+                    continue
 
-            folds_key = f"{model_type}_folds"
-            # TabTransformer 复用 LGBM 的 folds 数据
-            if model_type == 'tabtransformer' and folds_key not in cached_stock_data:
-                folds_key = 'lgbm_folds'
+                run_config = {
+                    'global_settings': global_settings, 'strategy_config': strategy_config,
+                    'default_model_params': default_model_params, 'stocks_to_process': [stock_info],
+                    'full_df_for_final_model': full_df
+                }
 
-            preprocessed_folds = cached_stock_data.get(folds_key)
-            if not preprocessed_folds:
-                print(f"\nWARNNING: 未找到 {keyword} ({ticker}) 的 '{model_type}' 预处理 folds。跳过训练。")
-                continue
+                ic_history = run_training_for_ticker(
+                    preprocessed_folds=preprocessed_folds,
+                    ticker=ticker, model_type=model_type, config=run_config, 
+                    force_retrain=force_retrain_base, keyword=keyword
+                )
+                
+                if ic_history is not None and not ic_history.empty:
+                    ic_history['ticker'] = ticker
+                    ic_history['model_type'] = model_type
+                    all_ic_history.append(ic_history)
+                
+                base_models_succeeded_count += 1
 
-            run_config = {
-                'global_settings': global_settings, 'strategy_config': strategy_config,
-                'default_model_params': default_model_params, 'stocks_to_process': [stock_info],
-                'full_df_for_final_model': full_df
-            }
-
-            ic_history = run_training_for_ticker(
-                preprocessed_folds=preprocessed_folds,
-                ticker=ticker, model_type=model_type, config=run_config, 
-                force_retrain=force_retrain_base, keyword=keyword
-            )
-            
-            if ic_history is not None and not ic_history.empty:
-                ic_history['ticker'] = ticker
-                ic_history['model_type'] = model_type
-                all_ic_history.append(ic_history)
-
-    # --- 2.3.5 融合模型训练 ---
-    if run_fusion:
-        print("\n--- 2.3.5 融合模型训练 ---")
-        if config and stocks_to_process:
-            if not force_retrain_base and not all_ic_history:
-                 print("INFO: 基础模型被跳过且无历史 IC 数据，因此跳过融合模型训练。")
-            else:
-                fuser_iterator = tqdm(stocks_to_process, desc="训练融合模型")
-                for stock_info in fuser_iterator:
-                    ticker = stock_info.get('ticker')
-                    keyword = stock_info.get('keyword', ticker)
-                    fuser_iterator.set_description(f"训练融合模型 for {keyword} ({ticker})")
-                    if not ticker: continue
-
-                    fuser = ModelFuser(ticker, config)
-                    
-                    if not force_retrain_fuser and fuser.meta_path.exists():
-                        print(f"INFO: {keyword} ({ticker}) 的融合模型元数据已存在。跳过训练。")
-                        continue
-
+            except Exception as e:
+                print(f"\nERROR: 为 {keyword} ({ticker}) 训练 {model_type.upper()} 模型时发生严重错误: {e}")
+        
+        # --- 2.3.5 融合模型训练 ---
+        if run_fusion and base_models_succeeded_count == len(models_to_train):
+            print(f"\n--- 2.3.5 为 {keyword} ({ticker}) 训练融合模型 ---")
+            try:
+                fuser = ModelFuser(ticker, config)
+                if not force_retrain_fuser and fuser.meta_path.exists():
+                    print(f"INFO: {keyword} ({ticker}) 的融合模型元数据已存在。跳过训练。")
+                else:
                     fuser.train()
-    else:
-        print("\n--- 2.3.5 融合模型训练 (已跳过) ---")
+            except Exception as e:
+                print(f"\nERROR: 为 {keyword} ({ticker}) 训练融合模型时发生严重错误: {e}")
+        elif run_fusion:
+            print(f"INFO: 由于 {keyword} ({ticker}) 的基础模型训练未完全成功或被跳过，跳过其融合模型训练。")
 
-    print("--- 阶段 2.3 成功完成。 ---")
+    print("\n--- 阶段 2.3 成功完成。 ---")
     return all_ic_history
 
 def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list) -> tuple:
@@ -1016,16 +1132,14 @@ def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list
     evaluation_summary['icir'] = np.where(evaluation_summary['std'] > 1e-8, evaluation_summary['mean'] / evaluation_summary['std'], evaluation_summary['mean'] * 100)
     
     print("\n" + "="*80)
-    print("### 1. 模型预测能力评估 (ICIR) ###")
+    print("=== 1. 模型预测能力评估 (ICIR) ===")
     print("="*80)
     print(evaluation_summary.to_string())
 
     # --- 2. 向量化回测 ---
     all_vectorized_results = []
     if fused_oof_preds_list and VectorizedBacktester:
-        print("\n" + "="*80)
-        print("### 2. 策略理论表现评估 (向量化回测) ###")
-        print("="*80)
+        print("=== 2. 策略理论表现评估 (向量化回测) ===")
         full_fused_oof_df = pd.concat(fused_oof_preds_list)
         for ticker, stock_oof_df in full_fused_oof_df.groupby('ticker'):
             try:
@@ -1154,7 +1268,7 @@ def run_single_stock_prediction(config: dict, modules: dict, target_ticker: str 
         # 3. 执行预测、决策和可视化
         _prophet_generate_decision(config, modules, artifacts, full_feature_df, target_ticker, keyword)
         
-        print(f"\n### 单点预测工作流已成功为 {keyword} ({target_ticker}) 执行完毕！ ###")
+        print(f"\n=== 单点预测工作流已成功为 {keyword} ({target_ticker}) 执行完毕！ ===")
     
     except Exception as e:
         print(f"\nFATAL: 单点预测工作流失败: {e}")
@@ -1182,7 +1296,7 @@ def run_complete_training_workflow(
     """
     (主函数1) 按顺序执行完整的、非交互式的训练工作流。
     """
-    print("### 主工作流：启动完整模型训练 ###")
+    print("=== 主工作流：启动完整模型训练 ===")
     try:
         run_all_data_pipeline(config, modules, use_today_as_end_date=use_today_as_end_date)
         
@@ -1207,7 +1321,7 @@ def run_complete_training_workflow(
             if run_visualization and (evaluation_summary is not None or backtest_summary is not None):
                 run_results_visualization(config, modules, evaluation_summary, backtest_summary, final_eval_df)
                 
-        print("\n### 完整训练工作流已成功执行完毕！ ###")
+        print("\n=== 完整训练工作流已成功执行完毕！ ===")
     except Exception as e:
         print(f"\nFATAL: 训练工作流在执行过程中发生严重错误: {e}")
         import traceback
@@ -1218,7 +1332,7 @@ def run_batch_prediction_workflow(config: dict, modules: dict):
     """
     为股票池中的所有股票执行单点预测。
     """
-    print("### 主工作流：启动批量预测 ###")
+    print("=== 主工作流：启动批量预测 ===")
 
     stocks_to_predict = config.get('stocks_to_process', [])
     if not stocks_to_predict:
@@ -1241,7 +1355,7 @@ def run_batch_prediction_workflow(config: dict, modules: dict):
             # 即使一只股票失败，也继续处理下一只
             continue
             
-    print(f"\n### 批量预测工作流执行完毕。成功预测 {successful_predictions} / {len(stocks_to_predict)} 只股票。 ###")
+    print(f"\n=== 批量预测工作流执行完毕。成功预测 {successful_predictions} / {len(stocks_to_predict)} 只股票。 ===")
 
 # --- 3. 自动化更新工作流 ---
 def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: False):
@@ -1296,7 +1410,7 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
             # 我们增加一个小的 buffer (例如1分钟)，以避免因文件系统时间精度问题导致的误判
             if last_data_update_time <= (last_train_time + pd.Timedelta(minutes=1)) and not full_retrain:
                 print("\nSUCCESS: 数据自上次成功训练以来未发生变化。无需执行更新。")
-                print("### 周期性更新工作流已跳过。 ###")
+                print("=== 周期性更新工作流已跳过。 ===")
                 return # <-- 关键：提前退出
 
     # 1. 动态更新配置

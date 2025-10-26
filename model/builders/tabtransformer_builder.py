@@ -1,3 +1,5 @@
+# 文件路径: model_builder/tabtransformer_builder.py
+
 import gc
 import copy
 import torch
@@ -207,11 +209,11 @@ class TabTransformerBuilder:
         cat_features = self.model_params.get('categorical_features', ['day_of_week', 'month'])
         cont_features = [c for c in X_full.columns if c not in cat_features]
 
-        # --- 2. (核心修复) 类别特征编码 ---
+        # --- 2. 类别特征编码 ---
         # 我们需要一个虚拟的 df_val 来满足 _encode_categorical_features 的接口
         X_full_encoded, _, encoders = encode_categorical_features(X_full.copy(), X_full.head(1).copy(), cat_features)
         
-        # --- 3. (核心修复) 只对连续特征进行标准化 ---
+        # --- 3. 只对连续特征进行标准化 ---
         final_scaler = StandardScaler()
         # fit_transform 只在连续特征上进行
         X_full_encoded[cont_features] = final_scaler.fit_transform(X_full_encoded[cont_features])
@@ -219,11 +221,11 @@ class TabTransformerBuilder:
         # --- 4. 准备 Tensors ---
         X_full_cont, X_full_cat, y_full_tensor = self._prepare_data_tensors(X_full_encoded, y_full)
         
-        # --- 5. (核心修复) 正确计算 cat_dims ---
+        # --- 5. 正确计算 cat_dims ---
         # 从编码后的数据中获取正确的类别数量
         cat_dims = [len(encoders[col].classes_) for col in cat_features]
 
-        # --- 6. 模型训练 (与之前类似) ---
+        # --- 6. 模型训练 ---
         p = self.model_params
         model = TabTransformerModel(
             num_continuous=len(cont_features),
@@ -256,13 +258,15 @@ class TabTransformerBuilder:
         print("    - SUCCESS: Final TabTransformer model training complete.")
         
         metadata = {
-            # 数据描述
+            # 数据描述 (用于调试和校验)
             'feature_cols': features,
             'cat_features': cat_features,
             'cont_features': cont_features,
+            
+            # 关键的重建参数
             'cat_dims': cat_dims, 
             
-            # (新增) 模型结构参数
+            # 将所有模型结构参数打包到一个独立的字典中
             'model_structure': {
                 'num_continuous': len(cont_features),
                 'dim': p.get('dim', 32),
@@ -272,6 +276,5 @@ class TabTransformerBuilder:
                 'ff_dropout': p.get('dropout', 0.1)
             }
         }
-
 
         return {'model': model, 'scaler': final_scaler, 'metadata': metadata, 'encoders': encoders}

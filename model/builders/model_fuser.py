@@ -1,4 +1,4 @@
-# 文件路径: model_builder/model_fuser.py (最终生产级版)
+# 文件路径: model_builder/model_fuser.py
 
 import json
 import joblib

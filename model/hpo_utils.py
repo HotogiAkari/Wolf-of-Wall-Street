@@ -41,7 +41,6 @@ def objective(trial, preprocessed_folds: list, config: dict, model_type: str = '
     search_space = model_hpo_config.get('search_space', {})
     
     params_to_tune = {}
-    # --- (核心修复) ---
     for param, args in search_space.items():
         if not isinstance(args, list) or len(args) < 2:
             print(f"WARNNING: HPO search_space for '{param}' is malformed. Skipping.")
@@ -81,9 +80,8 @@ def objective(trial, preprocessed_folds: list, config: dict, model_type: str = '
             
         else:
             print(f"WARNNING: Unknown HPO parameter type '{p_type}' for '{param}'. Skipping.")
-    # --- (修复结束) ---
 
-    # --- 模型实例化与评估 (逻辑不变) ---
+    # --- 模型实例化与评估 ---
     # 动态获取 Builder 类
     try:
         from model.builders.lgbm_builder import LGBMBuilder
@@ -153,12 +151,10 @@ def run_hpo_for_ticker(preprocessed_folds: list, ticker: str, config: dict, mode
     
     print(f"\n--- 开始为 {keyword} ({ticker}) 进行 {model_type.upper()} HPO (共 {n_trials} 轮) ---")
     
-    # --- 核心修正 1：关闭 Optuna 的默认日志 ---
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     study = optuna.create_study(direction="maximize", storage=None, sampler=optuna.samplers.TPESampler(seed=config.get('global_settings', {}).get('seed', 42)))
-    
-    # --- 核心修正 2：创建 TQDM 进度条和回调函数 ---
+
     best_value_tracker = {'value': -float('inf')}
     pbar = tqdm(total=n_trials, desc=f"HPO on {keyword}", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]')
 

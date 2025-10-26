@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 
 def check_no_large_gaps(series: Series[pd.Timestamp]) -> bool:
     """
-    (已重构) 校验时间序列索引中是否存在超过常规阈值的大间隙。
+    校验时间序列索引中是否存在超过常规阈值的大间隙。
     此版本会智能地忽略数据开头部分的“上市前”空白期。
     """
     if series.empty or len(series) < 2:

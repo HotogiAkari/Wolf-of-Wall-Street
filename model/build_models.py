@@ -132,10 +132,6 @@ def run_training_for_ticker(
         print("INFO: 未检测到任何历史记录，将从头开始全新训练。")
         start_fold_idx = 0
 
-    # --- 2. 动态导入 Builder ---
-    from model.builders.lgbm_builder import LGBMBuilder
-    from model.builders.lstm_builder import LSTMBuilder
-    from model.builders.tabtransformer_builder import TabTransformerBuilder
     builder_map = {'lgbm': LGBMBuilder, 'lstm': LSTMBuilder, 'tabtransformer': TabTransformerBuilder}
     builder = builder_map[model_type](config)
     
