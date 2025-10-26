@@ -145,6 +145,7 @@ def _get_ohlcv_data_bs(ticker: str,
     if config is None:
         raise ValueError("Config dictionary must be provided to _get_ohlcv_data_bs to resolve cache path.")
     cache_file_path = get_l1_cache_path(ticker, start_date, end_date, config)
+    cache_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     if cache_file_path.exists():
         print(f"  - 正在从本地缓存加载 {display_name} ({ticker}) 的原始日线数据...")
