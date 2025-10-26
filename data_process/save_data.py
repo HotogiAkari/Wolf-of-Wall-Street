@@ -10,6 +10,7 @@ from typing import Dict
 from pathlib import Path
 
 try:
+    from utils.date_utils import resolve_data_pipeline_dates
     from data_process.get_data import process_all_from_config
 except ImportError:
     print("错误: 无法找到 'get_data.py'。请确保它与本脚本在同一目录中或路径正确。")
@@ -117,36 +118,18 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
 def run_data_pipeline(config: dict):
     """
     主执行函数：智能地处理数据。
+    这个函数现在假设传入的 config 已经包含了由上游流程解析好的
+    正确的 start_date 和 end_date。
     """
     print("开始执行数据管道协调任务...")
-    
-    strategy_config = config.get('strategy_config', {})
-    
-    # 动态计算 start_date
-    print("INFO: 正在根据 'end_date' 和 'data_lookback_years' 动态计算 'start_date'...")
-    try:
-        end_date_dt = pd.to_datetime(strategy_config['end_date'])
-        lookback_years = strategy_config.get('data_lookback_years', 10)
-        earliest_start_date_dt = pd.to_datetime(strategy_config['earliest_start_date'])
-        
-        target_start_date_dt = end_date_dt - pd.DateOffset(years=lookback_years)
-        start_date_dt = max(target_start_date_dt, earliest_start_date_dt)
-        
-        calculated_start_date = start_date_dt.strftime('%Y-%m-%d')
-        
-        # 将计算结果“注入”回传入的 config 字典中
-        config['strategy_config']['start_date'] = calculated_start_date
-        print(f"      计算得出的 start_date 为: {calculated_start_date}，已更新到本次运行的全局配置中。")
 
-    except KeyError as e:
-        print(f"错误: 动态计算 start_date 失败，因为缺少关键配置项: {e}。")
-        return
-
+    # --- 前置检查 ---
     stocks_to_process = config.get('stocks_to_process', [])
     if not stocks_to_process:
         print("WARNNING: 股票池为空，无需处理。")
         return
         
+    # --- 确定需要增量生成数据的股票列表 ---
     tickers_to_generate = []
     for stock_info in stocks_to_process:
         # 使用官方路径函数检查文件是否存在
@@ -167,16 +150,13 @@ def run_data_pipeline(config: dict):
     display_list = [f"{ticker_to_keyword_map.get(t, t)} ({t})" for t in tickers_to_generate]    
     print(f"\n需要为以下 {len(tickers_to_generate)} 只股票生成新数据: {display_list}")
 
+    # --- 调用核心的数据处理流程 ---
     processed_data = process_all_from_config(config, tickers_to_generate=tickers_to_generate)
 
+    # --- 保存生成的数据 ---
     if processed_data:
         save_processed_data(processed_data, config)
     else:
         print("未能从数据管道获取任何新数据，跳过保存步骤。")
     
     print("\n数据管道协调任务执行完毕。")
-
-if __name__ == '__main__':
-    # 建议使用 YAML 配置文件以获得更好的可读性
-    DEFAULT_CONFIG_PATH = 'configs/system_config.yaml'
-    run_data_pipeline(config_path=DEFAULT_CONFIG_PATH)

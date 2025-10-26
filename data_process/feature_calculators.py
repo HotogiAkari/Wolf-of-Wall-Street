@@ -659,6 +659,12 @@ class ContextualFeatureCalculator(FeatureCalculator):
         return df
 
 # 创建注册表和运行器
+# 注意: ALL_CALCULATORS 列表中的顺序为数据处理顺序。
+# 1. 基础指标 (TechnicalIndicatorCalculator, PriceStructureCalculator) 必须先运行。
+# 2. 依赖于基础指标的计算器 (CrossoverSignalCalculator, CandleQuantCalculator) 必须在后面。
+# 3. 依赖于外部数据 (如 benchmark_close) 的计算器 (RelativeStrengthCalculator, ContextualFeatureCalculator)
+#    应该在数据合并之后，但通常没有严格的先后顺序。
+# 4. ContextualFeatureCalculator (交叉特征) 应该在它所依赖的基础特征计算完毕后运行。
 ALL_CALCULATORS = [
     TechnicalIndicatorCalculator,
     CalendarFeatureCalculator,

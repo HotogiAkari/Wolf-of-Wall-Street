@@ -11,43 +11,10 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm.autonotebook import tqdm
+from utils.file_utils import find_latest_artifact_paths
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 # --- 内部辅助函数 ---
-def _find_latest_artifact_paths(model_dir: Path, model_type: str) -> dict:
-    """
-    在指定目录中，根据文件名中的日期版本号找到最新模型及其关联构件的路径。
-    """
-    os = __import__('os')
-    pd = __import__('pandas')
-
-    # 1. 根据模型类型确定文件后缀
-    file_suffixes = {'lgbm': '.pkl', 'lstm': '.pt', 'tabtransformer': '.pt'}
-    model_suffix = file_suffixes.get(model_type, '.pkl')
-    
-    # 2. 查找所有匹配的模型文件
-    model_files = list(model_dir.glob(f"{model_type}_model_*{model_suffix}"))
-    if not model_files:
-        raise FileNotFoundError(f"未在目录 {model_dir} 中找到任何 {model_type.upper()} 的模型文件 (匹配 *{model_suffix})。")
-    
-    try:
-        # 按文件名中最后一个 '_' 后面的部分（即日期版本）进行排序
-        latest_model_file = sorted(model_files, key=lambda f: f.stem.split('_')[-1])[-1]
-    except IndexError:
-        raise ValueError(f"无法从模型文件名中解析出日期版本以进行排序。")
-
-    version_date = latest_model_file.stem.split('_')[-1]
-    
-    paths = {
-        'model': latest_model_file,
-        'scaler': model_dir / f"{model_type}_scaler_{version_date}.pkl",
-        'meta': model_dir / f"{model_type}_meta_{version_date}.json",
-        'encoders': model_dir / f"{model_type}_encoders_{version_date}.pkl",
-        'timestamp': version_date
-    }
-    
-    return paths
-
 def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use_specific_models: list = None) -> dict:
     """
     为单点预测加载所有必需的、最新版本的构件。
@@ -72,7 +39,7 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     if 'lgbm' in models_to_load:
         print(f"  - 正在加载 LGBM 的构件...")
         try:
-            paths = _find_latest_artifact_paths(model_dir, 'lgbm')
+            paths = find_latest_artifact_paths(model_dir, 'lgbm')
             artifacts['models']['lgbm'] = joblib.load(paths['model'])
             artifacts['scalers']['lgbm'] = joblib.load(paths['scaler'])
             loaded_versions['lgbm'] = paths['timestamp']
@@ -83,7 +50,7 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     if 'lstm' in models_to_load:
         print(f"  - 正在加载 LSTM 的构件...")
         try:
-            paths = _find_latest_artifact_paths(model_dir, 'lstm')
+            paths = find_latest_artifact_paths(model_dir, 'lstm')
             with open(paths['meta'], 'r') as f: metadata = json.load(f)
             
             model_structure = metadata.get('model_structure')
@@ -107,7 +74,7 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     if 'tabtransformer' in models_to_load and TabTransformerModel:
         print(f"  - 正在加载 TABTRANSFORMER 的构件...")
         try:
-            paths = _find_latest_artifact_paths(model_dir, 'tabtransformer')
+            paths = find_latest_artifact_paths(model_dir, 'tabtransformer')
             with open(paths['meta'], 'r') as f: metadata = json.load(f)
 
             model_structure = metadata.get('model_structure')
@@ -151,7 +118,7 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     for model_type_to_try in load_priority:
         if model_type_to_try in artifacts['models']:
             try:
-                paths = _find_latest_artifact_paths(model_dir, model_type_to_try)
+                paths = find_latest_artifact_paths(model_dir, model_type_to_try)
                 if paths['meta'].exists():
                     with open(paths['meta'], 'r') as f: meta = json.load(f)
                     feature_cols = meta.get('feature_cols')
@@ -276,23 +243,6 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
         
     print("--- 步骤2成功完成：最新特征数据已生成。 ---")
     return full_feature_df
-
-def _find_continuous_periods(dates):
-    """
-    从一个 DatetimeIndex 中找出所有连续的时间段。
-    """
-    from itertools import groupby
-    from operator import itemgetter
-    
-    if dates.empty:
-        return []
-        
-    periods = []
-    # toordinal() 将日期转换为整数，便于计算连续性
-    for _, g in groupby(enumerate(dates), lambda ix: ix[0] - ix[1].toordinal()):
-        group = list(map(itemgetter(1), g))
-        periods.append((group[0], group[-1]))
-    return periods
 
 def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, full_feature_df: pd.DataFrame, target_ticker: str, keyword: str):
     """
@@ -578,13 +528,15 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
     try:
         from data_process.get_data import initialize_apis, shutdown_apis, get_full_feature_df
         from data_process.save_data import run_data_pipeline, get_processed_data_path
-        from model.build_models import run_training_for_ticker, walk_forward_split
+        from model.build_models import run_training_for_ticker
         from model.hpo_utils import run_hpo_for_ticker
         from model.builders.model_fuser import ModelFuser
         from model.builders.lgbm_builder import LGBMBuilder
         from model.builders.lstm_builder import LSTMBuilder, LSTMModel
         from model.builders.tabtransformer_builder import TabTransformerBuilder, TabTransformerModel
-        from model.builders.utils import encode_categorical_features
+        from utils.encoding_utils import encode_categorical_features
+        from utils.date_utils import resolve_data_pipeline_dates
+        from utils.ml_utils import walk_forward_split
         from risk_management.risk_manager import RiskManager
         from backtest.backtester import VectorizedBacktester
         from backtest.event_driven_backtester import run_backtrader_backtest
@@ -614,6 +566,7 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
         'RiskManager': RiskManager, 'VectorizedBacktester': VectorizedBacktester,
         'encode_categorical_features': encode_categorical_features,
         'run_backtrader_backtest': run_backtrader_backtest,
+        'resolve_data_pipeline_dates': resolve_data_pipeline_dates,
         'pd': pd, 'torch': torch, 'joblib': joblib, 'tqdm': tqdm, 'StandardScaler': StandardScaler,
         'Path': Path, 'yaml': yaml, 'json': json
     }
@@ -623,42 +576,43 @@ def run_load_config_and_modules(config_path='configs/config.yaml'):
 
 def run_all_data_pipeline(config: dict, modules: dict, use_today_as_end_date=False):
     """
-    执行数据准备与特征工程阶段
+    执行数据准备与特征工程阶段。
+    这是所有训练工作流中，日期解析的唯一入口。
     """
     print("=== 阶段一：数据准备与特征工程 ===")
+    
+    # --- 1. 从 modules 字典中获取所需模块/函数 ---
     pd = modules['pd']
-    strategy_config = config.get('strategy_config', {})
+    resolve_data_pipeline_dates = modules['resolve_data_pipeline_dates']
 
-    # --- (核心修改) 动态日期计算 ---
+    # --- 2. 使用工具函数来解析日期 ---
+    # 如果指定了 use_today_as_end_date，则为工具函数准备一个临时键
     if use_today_as_end_date:
-        end_date_dt = pd.Timestamp.now()
-        print(f"INFO: 已启用动态日期模式，将使用今天的日期 '{end_date_dt.strftime('%Y-%m-%d')}' 作为 end_date。")
-    else:
-        end_date_dt = pd.to_datetime(strategy_config['end_date'])
-        print(f"INFO: 使用配置文件中的固定 end_date: '{end_date_dt.strftime('%Y-%m-%d')}'。")
+        today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+        # 注入 dynamic_end_date，让 resolve_data_pipeline_dates 优先使用它
+        config['strategy_config']['dynamic_end_date'] = today_str
+        print(f"INFO: 已启用动态日期模式，将使用今天的日期 '{today_str}' 作为 end_date。")
     
-    # 将最终确定的 end_date（字符串格式）注入/覆盖 config
-    config['strategy_config']['end_date'] = end_date_dt.strftime('%Y-%m-%d')
-    
-    # 根据最终的 end_date 计算 start_date (逻辑不变)
-    lookback_years = strategy_config.get('data_lookback_years', 10)
-    earliest_start_date_dt = pd.to_datetime(strategy_config['earliest_start_date'])
-    target_start_date_dt = end_date_dt - pd.DateOffset(years=lookback_years)
-    start_date_dt = max(target_start_date_dt, earliest_start_date_dt)
-    
-    # 将计算出的 start_date 注入 config
-    config['strategy_config']['start_date'] = start_date_dt.strftime('%Y-%m-%d')
-    print(f"      计算得出的 start_date 为: {config['strategy_config']['start_date']}")
-    
-    # --- 后续的 API 调用和 run_data_pipeline 调用 (逻辑不变) ---
     try:
+        resolve_data_pipeline_dates(config)
+    except KeyError:
+        print("ERROR: 日期解析失败，数据流水线中止。")
+        raise
+
+    # --- 3. 调用核心的数据 API 和处理流程 ---
+    try:
+        # 初始化 API (如 Baostock, Tushare)
         modules['initialize_apis'](config)
-        modules['run_data_pipeline'](config) # run_data_pipeline 现在接收一个已准备好日期的 config
+        
+        modules['run_data_pipeline'](config) 
+        
     except Exception as e:
         print(f"ERROR: 数据处理阶段发生严重错误: {e}")
         raise
     finally:
+        # 无论成功或失败，都确保 API 被安全登出
         modules['shutdown_apis']()
+        
     print("--- 阶段 1 成功完成。 ---")
 
 # --- 2. 阶段二：模型流水线 ---
@@ -721,14 +675,14 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 y_train, y_val = train_df[label_col], val_df[label_col]
                 X_train_raw, X_val_raw = train_df[features_for_model], val_df[features_for_model]
                 
+                # --- a. LGBM 和 LSTM 的通用标准化 (保持不变) ---
                 train_mean, train_std = X_train_raw.mean(), X_train_raw.std() + 1e-8
                 X_train_scaled = (X_train_raw - train_mean) / train_std
                 X_val_scaled = (X_val_raw - train_mean) / train_std
                 
-                # --- LGBM 数据准备 ---
                 preprocessed_folds_lgbm.append({'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model})
 
-                # --- TabTransformer 数据准备 ---
+                # --- b. TabTransformer 数据准备流程 ---
                 use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
                 if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer:
                     try:
@@ -737,19 +691,27 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                             print(f"WARNNING: 为 TabTransformer 配置的 categorical_features 为空，跳过。")
                             continue
 
-                        # 对已经标准化过的数据进行类别特征编码
-                        train_encoded, val_encoded, encoders = _encode_categorical_features(X_train_scaled.copy(), X_val_scaled.copy(), cat_features)
+                        cont_features = [c for c in features_for_model if c not in cat_features]
                         
+                        # 步骤 1: 先在原始数据上进行类别编码
+                        X_train_encoded, X_val_encoded, encoders = encode_categorical_features(X_train_raw.copy(), X_val_raw.copy(), cat_features)
+                        
+                        # 步骤 2: 然后只对连续特征计算均值/标准差，并进行标准化
+                        train_mean_cont = X_train_encoded[cont_features].mean()
+                        train_std_cont = X_train_encoded[cont_features].std() + 1e-8
+                        
+                        X_train_encoded[cont_features] = (X_train_encoded[cont_features] - train_mean_cont) / train_std_cont
+                        X_val_encoded[cont_features] = (X_val_encoded[cont_features] - train_mean_cont) / train_std_cont
+                        
+                        # 步骤 3: 准备 Tensors
                         cat_dims = [len(encoders[col].classes_) for col in cat_features]
                         
-                        cont_features = [c for c in features_for_model if c not in cat_features]
-
                         preprocessed_folds_tabtransformer.append({
-                            'X_train_cont': torch.from_numpy(train_encoded[cont_features].values.copy()).float(),
-                            'X_train_cat': torch.from_numpy(train_encoded[cat_features].values.copy()).long(),
+                            'X_train_cont': torch.from_numpy(X_train_encoded[cont_features].values.copy()).float(),
+                            'X_train_cat': torch.from_numpy(X_train_encoded[cat_features].values.copy()).long(),
                             'y_train_tensor': torch.from_numpy(y_train.values.copy()).float().unsqueeze(1),
-                            'X_val_cont': torch.from_numpy(val_encoded[cont_features].values.copy()).float(),
-                            'X_val_cat': torch.from_numpy(val_encoded[cat_features].values.copy()).long(),
+                            'X_val_cont': torch.from_numpy(X_val_encoded[cont_features].values.copy()).float(),
+                            'X_val_cat': torch.from_numpy(X_val_encoded[cat_features].values.copy()).long(),
                             'y_val_tensor': torch.from_numpy(y_val.values.copy()).float().unsqueeze(1),
                             'y_val': y_val, 
                             'cat_dims': cat_dims, 
@@ -757,7 +719,7 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                         })
                     except Exception as e:
                         print(f"\nERROR (L3 Cache Gen): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
-                
+
                 # --- LSTM 数据准备 ---
                 use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
                 if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
@@ -1531,6 +1493,7 @@ if __name__ == '__main__':
     parser.add_argument('--no-hpo', action='store_true', help="（仅用于 'train'）执行训练，但跳过超参数优化步骤。")
     parser.add_argument('--no-viz', action='store_true', help="（仅用于 'train'）执行训练，但不生成可视化图表。")
     parser.add_argument('--no-fusion', action='store_true', help="（仅用于 'train'）执行基础模型训练，但不训练融合模型。")
+    parser.add_argument('--latest', action='store_true', help="（仅用于 'train'）使用今天的日期作为 end_date，覆盖配置文件中的设置。")
     
     args = parser.parse_args()
 
@@ -1548,7 +1511,7 @@ if __name__ == '__main__':
             # 手动执行的完整训练，通常会运行 HPO 并使用已有的缓存来加速
             run_complete_training_workflow(
                 config=config, modules=modules,
-                use_today_as_end_date=args.latest if 'latest' in args else False,
+                use_today_as_end_date=args.latest, 
                 run_hpo=not args.no_hpo,
                 force_reprocess_l3=False,
                 force_retrain_base=False,

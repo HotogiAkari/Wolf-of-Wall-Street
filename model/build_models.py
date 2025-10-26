@@ -27,25 +27,6 @@ except ImportError:
     from model.builders.lstm_builder import LSTMBuilder
     from model.builders.tabtransformer_builder import TabTransformerBuilder
 
-def walk_forward_split(df: pd.DataFrame, config: dict) -> list:
-    if not isinstance(df.index, pd.DatetimeIndex): raise TypeError("Input DataFrame must have a DatetimeIndex.")
-    df = df.sort_index()
-    train_window, val_window = config.get("train_window", 500), config.get("val_window", 60)
-    dates = df.index.unique()
-    if len(dates) < train_window + val_window:
-        print(f"WARNNING: 数据长度 ({len(dates)}) 对于前向传播来说太短了."); return []
-    
-    folds = []
-    start_index = train_window
-    while start_index + val_window <= len(dates):
-        train_end_date = dates[start_index - 1]
-        val_end_date = dates[start_index + val_window - 1]
-        train_df, val_df = df.loc[:train_end_date], df.loc[train_end_date:val_end_date].iloc[1:]
-        if not val_df.empty:
-            folds.append((train_df, val_df))
-        start_index += val_window
-    return folds
-
 def run_training_for_ticker(
     preprocessed_folds: List[Dict[str, Any]],
     ticker: str, 

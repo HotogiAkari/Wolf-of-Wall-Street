@@ -12,6 +12,7 @@ import yfinance as yf
 from pathlib import Path
 from typing import Dict, Optional
 from tqdm.autonotebook import tqdm
+from utils.file_utils import download_with_retry, get_l1_cache_path
 from data_process.data_contracts import DataValidator
 from data_process.feature_calculators import run_all_feature_calculators
 from data_process.feature_postprocessors import run_all_feature_postprocessors, run_prediction_postprocessors
@@ -61,35 +62,6 @@ def shutdown_apis():
         print(f"WARNNING: 在 Baostock 登出时发生错误: {e}")
 
 # 内部辅助函数
-def _download_with_retry(api_call_func, max_retries=3, initial_delay=0.5):
-    """
-    一个通用的下载重试包装器，处理网络错误。
-    :param api_call_func: 要执行的 API 调用函数 (例如 bs.query_history_k_data_plus)
-    :param max_retries: 最大重试次数
-    :param initial_delay: 初始延迟秒数，每次重试后会加倍
-    :return: API 调用的结果
-    """
-    retries = 0
-    delay = initial_delay
-    while retries < max_retries:
-        try:
-            result = api_call_func()
-            return result
-        except Exception as e:
-            retries += 1
-            print(f"  - WARNNING: API call failed (Attempt {retries}/{max_retries}). Retrying in {delay:.2f} seconds. Error: {e}")
-            time.sleep(delay)
-            delay *= 2
-    
-    print(f"  - ERROR: API call failed after {max_retries} retries.")
-    class FailedResponse:
-        def __init__(self):
-            self.error_code = '-1'
-            self.error_msg = 'Max retries exceeded'
-        def get_data(self):
-            return pd.DataFrame()
-    return FailedResponse()
-
 def _get_api_ticker(ticker_from_config: str) -> str:
     if ticker_from_config is None: return ""
     ticker = ticker_from_config.lower().strip()
@@ -100,7 +72,7 @@ def _get_api_ticker(ticker_from_config: str) -> str:
     if not market or not code: return ticker
     return f"{market}.{code}"
 
-def _generate_market_breadth_data(start_date: str, end_date: str, cache_dir: Path) -> Optional[pd.DataFrame]:
+def _generate_market_breadth_data(start_date: str, end_date: str, cache_dir: Path, config: dict) -> Optional[pd.DataFrame]:
     """
     计算并缓存全市场的广度指标。
     应该在处理任何个股之前运行一次。
@@ -122,7 +94,7 @@ def _generate_market_breadth_data(start_date: str, end_date: str, cache_dir: Pat
     
     all_closes = []
     for code in tqdm(stock_codes, desc="下载成分股日线数据"):
-        df_stock = _get_ohlcv_data_bs(code, start_date, end_date, cache_dir)
+        df_stock = _get_ohlcv_data_bs(code, start_date, end_date, cache_dir, config=config)
         if df_stock is not None and not df_stock.empty:
             all_closes.append(df_stock['close'].rename(code))
         time.sleep(0.1)
@@ -159,14 +131,20 @@ def _generate_market_breadth_data(start_date: str, end_date: str, cache_dir: Pat
     return breadth_df
 
 # 核心初始化与数据获取函数
-def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: Path, keyword: str = None) -> Optional[pd.DataFrame]:
+def _get_ohlcv_data_bs(ticker: str, 
+                       start_date: str, 
+                       end_date: str, 
+                       cache_dir: Path, 
+                       keyword: str = None, 
+                       config: dict = None) -> Optional[pd.DataFrame]:
     """
     从 Baostock 获取日线行情数据，只依赖直接的路径参数。
     """
     display_name = keyword if keyword else ticker
-    raw_cache_dir = cache_dir / "raw_ohlcv"
-    raw_cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file_path = raw_cache_dir / f"raw_{ticker}_{start_date}_{end_date}.pkl"
+    
+    if config is None:
+        raise ValueError("Config dictionary must be provided to _get_ohlcv_data_bs to resolve cache path.")
+    cache_file_path = get_l1_cache_path(ticker, start_date, end_date, config)
 
     if cache_file_path.exists():
         print(f"  - 正在从本地缓存加载 {display_name} ({ticker}) 的原始日线数据...")
@@ -176,7 +154,7 @@ def _get_ohlcv_data_bs(ticker: str, start_date: str, end_date: str, cache_dir: P
     start_fmt, end_fmt = pd.to_datetime(start_date).strftime('%Y-%m-%d'), pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
     api_call = lambda: bs.query_history_k_data_plus(ticker, "date,open,high,low,close,volume", start_date=start_fmt, end_date=end_date, frequency="d", adjustflag="2")
-    rs = _download_with_retry(api_call)
+    rs = download_with_retry(api_call)
     
     if rs.error_code != '0':
         print(f"  - WARNING [BS]: 获取 {display_name} ({ticker}) 数据失败: {rs.error_msg}")
@@ -219,7 +197,7 @@ def _get_index_data_bs(
     name_to_show = display_name if display_name else "未知指数"
     print(f"  - INFO: 正在为 '{name_to_show}' ({index_code}) 获取指数数据...")
     
-    index_df = _get_ohlcv_data_bs(index_code, start_date, end_date, cache_dir, keyword=name_to_show)
+    index_df = _get_ohlcv_data_bs(index_code, start_date, end_date, cache_dir, keyword=name_to_show, config=config)
     if index_df is not None and not index_df.empty:
         print(f"    - SUCCESS: 已直接从 Baostock 获取到 '{name_to_show}' ({index_code}) 的数据。")
         return index_df
@@ -260,7 +238,7 @@ def _get_index_data_bs(
         
         # 2. 循环下载成分股数据
         for stock_code in tqdm(constituents, desc=f"下载 '{name_to_show}' ({index_code}) 的成分股", leave=False):
-            stock_df = _get_ohlcv_data_bs(stock_code, start_date, end_date, cache_dir, keyword=stock_code)
+            stock_df = _get_ohlcv_data_bs(stock_code, start_date, end_date, cache_dir, keyword=stock_code, config=config)
             if stock_df is not None and not stock_df.empty:
                 all_closes.append(stock_df['close'].rename(stock_code))
             time.sleep(0.05)
@@ -477,7 +455,7 @@ def get_full_feature_df(
     # --- 1. 数据获取 ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
     
-    df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name)
+    df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name, config=config)
     if df is None:
         raise ValueError(f"为 {display_name} ({ticker}) 获取基础 OHLCV 数据失败。")
 
@@ -567,17 +545,24 @@ def process_all_from_config(config: dict, tickers_to_generate: list = None) -> D
     cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
     print("\n--- 正在准备所有全局市场数据 (此过程只运行一次) ---")
 
-    breadth_df = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir)
+    breadth_df = _generate_market_breadth_data(start_date_str, end_date_str, cache_dir, config=config)
     time.sleep(0.5)
 
-    external_market_df = None
+    all_external_dfs = []
     external_tickers = strategy_config.get('external_market_tickers', [])
     if external_tickers:
-        ext_ticker = external_tickers[0]
-        external_market_df = _get_us_stock_data_yf(ext_ticker, start_date_str, end_date_str, cache_dir)
-        if external_market_df is not None:
-            external_market_df.rename(columns={'close': 'close_ext', 'open': 'open_ext', 'volume': 'volume_ext'}, inplace=True)
-    time.sleep(0.5)
+        print(f"INFO: 正在下载 {len(external_tickers)} 个外部市场的数据: {external_tickers}")
+        for ext_ticker in external_tickers:
+            df_ext = _get_us_stock_data_yf(ext_ticker, start_date_str, end_date_str, cache_dir)
+            if df_ext is not None and not df_ext.empty:
+                df_ext_renamed = df_ext.rename(columns=lambda c: f"{c}_{ext_ticker}")
+                all_external_dfs.append(df_ext_renamed)
+            time.sleep(0.2)
+
+    # 将所有下载的外部市场数据合并到一个 DataFrame 中
+    external_market_df = pd.concat(all_external_dfs, axis=1) if all_external_dfs else None
+    if external_market_df is not None:
+        print(f"SUCCESS: 所有外部市场数据已合并。维度: {external_market_df.shape}")
 
     sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
     time.sleep(0.5)

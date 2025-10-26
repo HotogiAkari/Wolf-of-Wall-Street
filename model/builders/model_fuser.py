@@ -12,33 +12,12 @@ from scipy.stats import spearmanr
 from sklearn.metrics import make_scorer
 from sklearn.linear_model import Ridge
 from sklearn.linear_model import ElasticNet
+from utils.ml_utils import spearman_corr_scorer
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.model_selection import cross_val_score
 from typing import Dict, List, Optional, Union
-
-def spearman_corr_scorer(y_true, y_pred):
-    """
-    使用 SciPy 计算 Spearman 相关系数，以忽略 Pandas 索引。
-    """
-    # 将输入转换为 NumPy 数组，确保没有索引
-    y_true_vals = np.asarray(y_true)
-    y_pred_vals = np.asarray(y_pred)
-    # 检查常量输入
-    if np.var(y_true_vals) < 1e-8:
-        return 0.0
-    if np.var(y_pred_vals) < 1e-8:
-        if 'ModelFuser' in str(inspect.stack()[1][0].f_locals.get('self', '')): # 仅在 Fuser 内部打印
-             print("  - DIAGNOSTIC (Scorer): y_pred is constant! Meta-model failed to learn. Returning 0.0")
-        return 0.0
-    try:
-        # spearmanr 返回 (correlation, p-value)
-        correlation, _ = spearmanr(y_true_vals, y_pred_vals)    
-        # 处理 SciPy 可能返回 NaN 的情况
-        return correlation if np.isfinite(correlation) else 0.0
-    except Exception:
-        return 0.0
 
 class ModelFuser:
     """
@@ -100,21 +79,46 @@ class ModelFuser:
     def train(self):
         if self.verbose: print(f"\n--- 正在为 {self.ticker} 训练融合元模型... ---")
         
-        all_oof_preds = self._get_oof_predictions()
-        if all_oof_preds is None or all_oof_preds.shape[1] < 2:
-            if self.verbose: print("INFO: 只有一个或更少的基础模型提供了 OOF 预测，无法训练融合模型。")
-            self.use_fallback = True; return # 直接进入回退模式
+        # a. 查找所有 OOF 文件
+        oof_files = list(self.model_dir.glob("*_oof_preds.csv"))
+        if len(oof_files) < 2: # 至少需要两个模型才能融合
+            if self.verbose: print(f"INFO: 找到的 OOF 预测文件少于2个。无法训练融合模型。")
+            self.use_fallback = True; return
 
-        oof_lgbm_path = self.model_dir / "lgbm_oof_preds.csv"
-        if not oof_lgbm_path.exists():
-            if self.verbose: print("ERROR: 找不到 lgbm_oof_preds.csv 文件以获取真实标签。")
+        # b. 分别加载 y_pred 和 y_true
+        all_y_preds = []
+        all_y_trues = []
+        
+        for oof_path in oof_files:
+            model_type = oof_path.name.replace('_oof_preds.csv', '')
+            df = pd.read_csv(oof_path, parse_dates=['date']).set_index('date')
+            
+            # 收集 y_pred
+            if 'y_pred' in df.columns:
+                all_y_preds.append(df[['y_pred']].rename(columns={'y_pred': f'pred_{model_type}'}))
+            
+            # 收集 y_true
+            if 'y_true' in df.columns:
+                all_y_trues.append(df[['y_true']].rename(columns={'y_true': f'y_true_{model_type}'}))
+
+        if not all_y_preds or not all_y_trues:
+            if self.verbose: print("ERROR: 未能从 OOF 文件中加载任何 y_pred 或 y_true 数据。")
             return
-
-        y_true_df = pd.read_csv(oof_lgbm_path, parse_dates=['date']).set_index('date')[['y_true']]
+            
+        # c. 合并并验证 y_true 的一致性
+        y_true_df_combined = pd.concat(all_y_trues, axis=1)
+        # 检查所有 y_true_* 列是否都相同
+        if y_true_df_combined.shape[1] > 1 and not y_true_df_combined.apply(lambda x: x.nunique() <= 1, axis=1).all():
+            print("WARNNING: 来自不同模型的 OOF 文件的 y_true 标签不一致！这可能表明数据存在问题。将使用第一列作为基准。")
+        
+        # d. 最终确定 y_true 和 all_oof_preds
+        y_true_df = y_true_df_combined.iloc[:, [0]].rename(columns={y_true_df_combined.columns[0]: 'y_true'})
+        all_oof_preds = pd.concat(all_y_preds, axis=1)
+        
         aligned_data = all_oof_preds.join(y_true_df, how='inner').dropna()
         
         if len(aligned_data) < 50:
-            if self.verbose: print(f"WARNNING: 对齐样本量过少 ({len(aligned_data)} < 50)。")
+            if self.verbose: print(f"WARNNING: 对齐样本量过少 ({len(aligned_data)} < 50)，无法训练融合模型。")
             return
 
         pred_cols = [c for c in aligned_data.columns if c.startswith('pred_')]

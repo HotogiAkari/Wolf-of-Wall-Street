@@ -11,7 +11,7 @@ from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from model.builders.utils import encode_categorical_features
+from utils.encoding_utils import encode_categorical_features
 
 class TabTransformerModel(nn.Module):
     """

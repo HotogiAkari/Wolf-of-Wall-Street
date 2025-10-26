@@ -322,10 +322,6 @@ stocks_to_process:
   - ticker: '002006.SZ'
     keyword: '精功科技'
     industry_etf: '512480.SH'   # 机械装备制造ETF
-  
-  - ticker: '300242.SZ'
-    keyword: '佳云科技'
-    industry_etf: '159939.SZ'   # 科技 / 互联网 ETF
 
 # --- 6. 可视化配置 ---
 visualization_settings:
