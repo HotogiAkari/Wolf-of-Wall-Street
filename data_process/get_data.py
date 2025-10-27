@@ -201,9 +201,9 @@ def _get_index_data_bs(
         print(f"    - SUCCESS: 已直接从 Baostock 获取到 '{name_to_show}' ({index_code}) 的数据。")
         return index_df
 
-    # --- 整合回退开关逻辑 ---
-    strategy_cfg = config.get('strategy_config', {})
-    fallback_on_index_fail = strategy_cfg.get('fallback_on_index_fail', True)
+    # --- (核心修改) 从 'features' 配置组读取回退开关 ---
+    features_cfg = config.get('features', {})
+    fallback_on_index_fail = features_cfg.get('fallback_on_index_fail', True)
 
     if not fallback_on_index_fail:
         print(f"    - ERROR: 无法直接获取指数 '{name_to_show}' ({index_code})。根据配置，已中止操作。")
@@ -211,7 +211,9 @@ def _get_index_data_bs(
 
     print(f"    - 警告: 无法直接获取指数 '{name_to_show}' ({index_code})。将尝试在本地合成等权重指数...")
     try:
-        constituent_api_map_str = config.get('baostock_index_constituent_map', {})
+        # --- (核心修改) 从 'data' 配置组读取 API 映射表 ---
+        data_cfg = config.get('data', {})
+        constituent_api_map_str = data_cfg.get('baostock_index_constituent_map', {})
 
         api_func_name = constituent_api_map_str.get(index_code)
         if api_func_name is None:
@@ -224,30 +226,26 @@ def _get_index_data_bs(
             return None
         
         api_func = getattr(bs, api_func_name)
-
         rs = api_func()
         
-        constituents = rs.get_data()['code'].tolist()
-        if not constituents:
+        constituents_df = rs.get_data()
+        if constituents_df.empty:
             print(f"    - 错误: 未能获取到指数 '{name_to_show}' ({index_code}) 的成分股列表。")
             return None
             
-        # 1. 在循环前初始化 all_closes
-        all_closes = []
+        constituents = constituents_df['code'].tolist()
         
-        # 2. 循环下载成分股数据
+        all_closes = []
         for stock_code in tqdm(constituents, desc=f"下载 '{name_to_show}' ({index_code}) 的成分股", leave=False):
             stock_df = _get_ohlcv_data_bs(stock_code, start_date, end_date, cache_dir, keyword=stock_code, config=config)
             if stock_df is not None and not stock_df.empty:
                 all_closes.append(stock_df['close'].rename(stock_code))
             time.sleep(0.05)
 
-        # 3. 在循环后检查 all_closes 是否为空
         if not all_closes:
             print(f"    - 错误: 未能为 '{name_to_show}' ({index_code}) 下载到任何有效的成分股数据。")
             return None
             
-        # 4. 合并所有收盘价，并计算等权重指数 (这部分逻辑是正确的)
         all_closes_df = pd.concat(all_closes, axis=1)
         daily_returns = all_closes_df.pct_change().fillna(0)
         equal_weighted_return = daily_returns.mean(axis=1)
@@ -264,7 +262,7 @@ def _get_index_data_bs(
     except Exception as e:
         print(f"    - 错误: 在本地合成指数 '{name_to_show}' ({index_code}) 时发生未知错误: {e}")
         return None
-
+    
 def _get_us_stock_data_yf(ticker: str, start_date: str, end_date: str, cache_dir: Path, 
                           max_retries: int = 3, initial_delay: float = 0.5) -> Optional[pd.DataFrame]:
     """
@@ -534,12 +532,14 @@ def process_all_from_config(config: dict, tickers_to_generate: list = None) -> D
     if not config:
         print("错误: 传入的 config 字典为空。"); return {}
     
-    # --- 1. 在循环外准备所有全局数据 ---
-    strategy_config = config.get('strategy_config', {})
-    start_date_str = strategy_config.get('start_date')
-    end_date_str = strategy_config.get('end_date')
+    # --- 1. (核心修改) 从 'data' 和 'features' 配置组读取参数 ---
+    data_config = config.get('data', {})
+    features_config = config.get('features', {})
+    
+    start_date_str = data_config.get('start_date')
+    end_date_str = data_config.get('end_date')
     if not all([start_date_str, end_date_str]):
-        print(f"错误: config 字典中缺少 'start_date' 或 'end_date'。"); return {}
+        print(f"错误: config 字典的 'data' 组中缺少 'start_date' 或 'end_date'。"); return {}
     
     cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
     print("\n--- 正在准备所有全局市场数据 (此过程只运行一次) ---")
@@ -548,7 +548,7 @@ def process_all_from_config(config: dict, tickers_to_generate: list = None) -> D
     time.sleep(0.5)
 
     all_external_dfs = []
-    external_tickers = strategy_config.get('external_market_tickers', [])
+    external_tickers = features_config.get('external_market_tickers', [])
     if external_tickers:
         print(f"INFO: 正在下载 {len(external_tickers)} 个外部市场的数据: {external_tickers}")
         for ext_ticker in external_tickers:
@@ -558,10 +558,10 @@ def process_all_from_config(config: dict, tickers_to_generate: list = None) -> D
                 all_external_dfs.append(df_ext_renamed)
             time.sleep(0.2)
 
-    # 将所有下载的外部市场数据合并到一个 DataFrame 中
     external_market_df = pd.concat(all_external_dfs, axis=1) if all_external_dfs else None
     if external_market_df is not None:
         print(f"SUCCESS: 所有外部市场数据已合并。维度: {external_market_df.shape}")
+    time.sleep(0.5)
 
     sentiment_df = _get_market_sentiment_data_ak(start_date_str, end_date_str, cache_dir)
     time.sleep(0.5)
@@ -573,11 +573,11 @@ def process_all_from_config(config: dict, tickers_to_generate: list = None) -> D
     
     print("--- 所有全局市场数据准备完毕 ---\n")
     
-    # --- 2. 循环处理每只股票 ---
+    # --- 2. (核心修改) 从 'data' 配置组读取股票池 ---
     results_df = {}
-    stocks_to_process = config.get('stocks_to_process', [])
+    stocks_to_process = data_config.get('stocks_to_process', [])
     if not stocks_to_process:
-        print("警告: 'stocks_to_process' 列表为空，不处理任何数据。"); return {}
+        print("警告: 'data' 配置组中的 'stocks_to_process' 列表为空，不处理任何数据。"); return {}
     
     target_stocks = stocks_to_process
     if tickers_to_generate:

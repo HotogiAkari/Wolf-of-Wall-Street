@@ -44,7 +44,7 @@ class TechnicalIndicatorCalculator(FeatureCalculator):
     根据配置动态计算技术分析指标。
     """
     def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        indicators_to_calc = self.config.get('technical_indicators', [])
+        indicators_to_calc = self.config.get('features', {}).get('technical_indicators', [])
         if not indicators_to_calc:
             print(f"  - [Calculating Features] INFO: No technical indicators specified in config. Skipping {self.name}.")
             return df
@@ -84,7 +84,7 @@ class CandlestickPatternCalculator(FeatureCalculator):
             print(f"WARNNING: [{self.name}] DataFrame is missing required columns. Skipping.")
             return df
 
-        patterns_to_calc = self.config.get('candlestick_patterns', [])
+        patterns_to_calc = self.config.get('features', {}).get('candlestick_patterns', [])
         if not patterns_to_calc:
             print(f"  - [Calculating Features] INFO: No candlestick patterns specified in config. Skipping {self.name}.")
             return df
@@ -123,7 +123,7 @@ class StatisticalFeatureCalculator(FeatureCalculator):
 
     def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         print(f"  - [Calculating Features] Running: {self.name}...")
-        window_sizes = self.config.get('stat_windows', [5, 10, 20])
+        window_sizes = self.config.get('features', {}).get('stat_windows', [5, 10, 20])
         for w in window_sizes:
             df[f'return_{w}'] = df['close'].pct_change(w)
             df[f'volatility_{w}'] = df['close'].pct_change().rolling(w).std()
@@ -190,7 +190,7 @@ class TrendRegimeFeatureCalculator(FeatureCalculator):
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name} (Vectorized)...")
         
-        window = self.config.get('strategy_config', {}).get('trend_window', 30)
+        window = self.config.get('features', {}).get('trend_window', 30)
         
         # 创建一个代表时间流逝的序列 [0, 1, 2, ...]，用于线性回归的 X 轴
         df['time_index'] = np.arange(len(df))
@@ -228,7 +228,7 @@ class MomentumVolatilityCalculator(FeatureCalculator):
         
         # 从配置中获取要计算的窗口期（以月为单位）
         periods_in_month = 21 # 平均每月约21个交易日
-        windows = self.config.get('strategy_config', {}).get('momentum_windows', [3, 6, 12]) # 默认计算3,6,12个月的因子
+        windows = self.config.get('features', {}).get('momentum_windows', [3, 6, 12]) # 默认计算3,6,12个月的因子
         
         daily_ret = df['close'].pct_change().fillna(0)
         
@@ -267,7 +267,7 @@ class AdvancedRiskCalculator(FeatureCalculator):
         if self.config.get('global_settings', {}).get('verbose', True):
             print(f"  - [Calculating Features] Running: {self.name}...")
 
-        window_sizes = self.config.get('stat_windows', [20, 60, 120]) # 月度、季度、半年度
+        window_sizes = self.config.get('features', {}).get('stat_windows', [20, 60, 120]) # 月度、季度、半年度
 
         for w in window_sizes:
             # 1. 计算滚动窗口内的最高价
@@ -401,7 +401,7 @@ class RelativeStrengthCalculator(FeatureCalculator):
             print(f"    - WARNNING: Missing 'benchmark_close' or 'industry_close' column. Skipping {self.name}.")
             return df
 
-        window_sizes = self.config.get('stat_windows', [5, 10, 20])
+        window_sizes = self.config.get('features', {}).get('stat_windows', [5, 10, 20])
 
         # 1. 计算相对价格比率
         # 用 fillna(method='ffill') 填充周末或节假日可能出现的缺失
@@ -529,7 +529,7 @@ class CrossoverSignalCalculator(FeatureCalculator):
         return "交叉信号特征 (金叉/死叉)"
 
     def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        crossover_rules = self.config.get('crossover_signals', [])
+        crossover_rules = self.config.get('features', {}).get('crossover_signals', [])
         if not crossover_rules:
             print(f"  - [计算特征] 信息: 未在配置中指定交叉信号规则，跳过 {self.name}。")
             return df
@@ -686,13 +686,13 @@ class ContextualFeatureCalculator(FeatureCalculator):
 
 def run_all_feature_calculators(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:
     """
-    (可扩展版) 实例化并按指定阶段顺序运行所有已注册的特征计算器。
+    实例化并按指定阶段顺序运行所有已注册的特征计算器。
     """
     print("INFO: 开始特征计算流水线...")
     df_copy = df.copy()
     
     # 从 config 中读取执行阶段的顺序，如果未定义则使用默认顺序
-    calculator_phases = config.get('strategy_config', {}).get(
+    calculator_phases = config.get('features', {}).get(
         'calculator_phases', 
         ['base', 'contextual', 'composite'] # 默认顺序
     )

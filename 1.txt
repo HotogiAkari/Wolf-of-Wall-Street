@@ -1,0 +1,19 @@
+
+5. data_process/feature_postprocessors.py: run_all_feature_postprocessors
+6. data_process/feature_postprocessors.py: RawReturnLabelCalculator.process
+7. data_process/feature_postprocessors.py: CorrelationSelector.process
+8. data_process/feature_postprocessors.py: AlphaLabelCalculator.process
+C. model 包 (模型构建)
+9. model/build_models.py: walk_forward_split
+10. model_builders/lgbm_builder.py: LGBMBuilder.__init__
+11. model_builders/lstm_builder.py: LSTMBuilder.__init__
+12. model_builders/tabtransformer_builder.py: TabTransformerBuilder.__init__
+13. model_builders/model_fuser.py: ModelFuser.__init__ (访问 fuser_params)
+14. model/hpo_utils.py: objective
+D. main_train.py (顶层编排)
+15. main_train.py: main (移除兼容性补丁)
+16. main_train.py: run_hpo_train
+17. main_train.py: _prophet_get_latest_features
+18. main_train.py: _prophet_generate_decision
+E. risk_management 包 (风控)
+19. risk_management/risk_manager.py: RiskManager.approve_trade

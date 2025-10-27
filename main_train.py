@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm.autonotebook import tqdm
-from omegaconf import DictConfig, OmegaConf, MISSING
+from omegaconf import DictConfig, OmegaConf
 from utils.file_utils import find_latest_artifact_paths
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
@@ -27,7 +27,8 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     
     Path, joblib, torch, json = modules['Path'], modules['joblib'], modules['torch'], modules['json']
     ModelFuser, RiskManager, LSTMModel, TabTransformerModel = modules['ModelFuser'], modules['RiskManager'], modules['LSTMModel'], modules.get('TabTransformerModel')
-    
+    find_latest_artifact_paths = modules['find_latest_artifact_paths']
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     artifacts = {'models': {}, 'scalers': {}, 'encoders': {}, 'feature_cols': None}
     model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / target_ticker
@@ -138,7 +139,6 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     # --- 3. 加载通用构件 ---
     try:
         latest_fuser_paths = find_latest_artifact_paths(model_dir, 'fuser')
-
         fuser_version = latest_fuser_paths.get('timestamp')
         artifacts['fuser'] = ModelFuser(target_ticker, config, version=fuser_version)
 
@@ -400,7 +400,7 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     # --- 6. 风险审批与决策 ---
     print("\n--- 步骤6：风险审批与决策输出 ---")
     risk_manager = artifacts['risk_manager']
-    signal_threshold = config.get('strategy_config', {}).get('signal_threshold', 0.005)
+    signal_threshold = config.get('backtest', {}).get('live_trading_signal_threshold', 0.01)
     direction_str = 'BUY' if fused_prediction > signal_threshold else ('SELL' if fused_prediction < -signal_threshold else 'HOLD')
     trade_price = latest_features['close'].iloc[0]
     decision_approved, order_id, decision_notes = False, None, "信号强度未达到开仓阈值。"
@@ -430,7 +430,10 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
         import matplotlib.pyplot as plt; import seaborn as sns; from matplotlib.patches import Patch
         
         plt.style.use('seaborn-v0_8-darkgrid')
-        try: plt.rcParams['font.sans-serif'] = ['SimHei']; plt.rcParams['axes.unicode_minus'] = False
+        try: 
+            plt.style.use('seaborn-v0_8-whitegrid')
+            plt.rcParams['font.sans-serif'] = ['SimHei']
+            plt.rcParams['axes.unicode_minus'] = False
         except: print("WARNNING: 未能设置中文字体 'SimHei'。")
         
         plot_df = full_feature_df.tail(200).copy()
@@ -488,82 +491,6 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
         plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.show()
     except Exception as e:
         print(f"WARNNING: 绘图时发生错误: {e}"); import traceback; traceback.print_exc()
-
-# --- 0. 环境与模块加载 ---
-
-def run_load_config_and_modules(config_path='configs/config.yaml'):
-    """
-    加载配置文件，并将所有必需的模块动态导入到一个字典中。
-    """
-    print("--- 正在初始化环境：加载配置与模块... ---")
-
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            temp_config = yaml.safe_load(f)
-        
-        num_cores = temp_config.get('global_settings', {}).get('num_cpu_cores_for_data', '4')
-        
-        os.environ['OMP_NUM_THREADS'] = str(num_cores)
-        os.environ['MKL_NUM_THREADS'] = str(num_cores)
-        os.environ['OPENBLAS_NUM_THREADS'] = str(num_cores)
-        
-        print(f"INFO: 底层并行计算库线程数已设置为: {num_cores}")
-
-    except FileNotFoundError:
-        print(f"WARNNING: 未找到配置文件 '{config_path}'，无法设置并行线程数。将使用默认值。")
-    except Exception as e:
-        print(f"WARNNING: 读取配置文件以设置并行线程数时出错: {e}")
-    
-    project_root = str(Path(__file__).resolve().parent)
-    if project_root not in sys.path:
-        sys.path.append(project_root)
-
-    try:
-        from data_process.get_data import initialize_apis, shutdown_apis, get_full_feature_df
-        from data_process.save_data import run_data_pipeline, get_processed_data_path
-        from model.build_models import run_training_for_ticker
-        from model.hpo_utils import run_hpo_for_ticker
-        from model.builders.model_fuser import ModelFuser
-        from model.builders.lgbm_builder import LGBMBuilder
-        from model.builders.lstm_builder import LSTMBuilder, LSTMModel
-        from model.builders.tabtransformer_builder import TabTransformerBuilder, TabTransformerModel
-        from utils.encoding_utils import encode_categorical_features
-        from utils.date_utils import resolve_data_pipeline_dates
-        from utils.ml_utils import walk_forward_split
-        from risk_management.risk_manager import RiskManager
-        from backtest.backtester import VectorizedBacktester
-        from backtest.event_driven_backtester import run_backtrader_backtest
-        print("INFO: 项目模块导入成功。")
-    except ImportError as e:
-        print(f"ERROR: 模块导入失败: {e}")
-        return None, None
-    
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        print(f"SUCCESS: 配置已从 '{config_path}' 加载。")
-    except FileNotFoundError:
-        print(f"ERROR: 配置文件未找到: {config_path}")
-        return None, None
-
-    modules = {
-        'initialize_apis': initialize_apis, 'shutdown_apis': shutdown_apis,
-        'get_full_feature_df': get_full_feature_df, 'run_data_pipeline': run_data_pipeline, 
-        'get_processed_data_path': get_processed_data_path, 'run_training_for_ticker': run_training_for_ticker, 
-        'walk_forward_split': walk_forward_split, 'run_hpo_for_ticker': run_hpo_for_ticker,
-        'ModelFuser': ModelFuser, 
-        'LGBMBuilder': LGBMBuilder,
-        'LSTMBuilder': LSTMBuilder, 'LSTMModel': LSTMModel, 
-        'TabTransformerBuilder': TabTransformerBuilder,
-        'TabTransformerModel': TabTransformerModel,
-        'RiskManager': RiskManager, 'VectorizedBacktester': VectorizedBacktester,
-        'encode_categorical_features': encode_categorical_features,
-        'run_backtrader_backtest': run_backtrader_backtest,
-        'resolve_data_pipeline_dates': resolve_data_pipeline_dates,
-        'pd': pd, 'torch': torch, 'joblib': joblib, 'tqdm': tqdm, 'StandardScaler': StandardScaler,
-        'Path': Path, 'yaml': yaml, 'json': json
-    }
-    return config, modules
 
 # --- 1. 阶段一：数据流水线 ---
 
@@ -1274,6 +1201,103 @@ def run_single_stock_prediction(config: dict, modules: dict, target_ticker: str 
 
 # --- 主执行函数 ---
 
+# --- Hydra 主执行函数 ---
+@hydra.main(config_path="configs", config_name="config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    """
+    Hydra 驱动的主执行函数 (命令行入口)。
+    """
+    print("--- 启动量化模型核心引擎 (由 Hydra 管理) ---")
+    
+    # --- 1. 配置处理 ---
+    config = OmegaConf.to_container(cfg, resolve=True)
+    
+    # --- 2. 模块动态加载 ---
+    project_root = str(Path(__file__).resolve().parent)
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+
+    try:
+        from data_process.get_data import initialize_apis, shutdown_apis, get_full_feature_df
+        from data_process.save_data import run_data_pipeline, get_processed_data_path
+        from model.build_models import run_training_for_ticker
+        from model.hpo_utils import run_hpo_for_ticker
+        from model.builders.model_fuser import ModelFuser
+        from model.builders.lgbm_builder import LGBMBuilder
+        from model.builders.lstm_builder import LSTMBuilder, LSTMModel
+        from model.builders.tabtransformer_builder import TabTransformerBuilder, TabTransformerModel
+        from risk_management.risk_manager import RiskManager
+        from backtest.backtester import VectorizedBacktester
+        from backtest.event_driven_backtester import run_backtrader_backtest
+        from utils.date_utils import resolve_data_pipeline_dates
+        from utils.encoding_utils import encode_categorical_features
+        from utils.file_utils import find_latest_artifact_paths
+        from utils.ml_utils import walk_forward_split
+        print("INFO: 项目模块导入成功。")
+    except ImportError as e:
+        print(f"FATAL: 模块导入失败: {e}")
+        return
+
+    # 构建 modules 字典
+    modules = {
+        'initialize_apis': initialize_apis, 'shutdown_apis': shutdown_apis,
+        'get_full_feature_df': get_full_feature_df, 'run_data_pipeline': run_data_pipeline,
+        'get_processed_data_path': get_processed_data_path, 'run_training_for_ticker': run_training_for_ticker,
+        'run_hpo_for_ticker': run_hpo_for_ticker, 'ModelFuser': ModelFuser,
+        'LGBMBuilder': LGBMBuilder, 'LSTMBuilder': LSTMBuilder, 'LSTMModel': LSTMModel,
+        'TabTransformerBuilder': TabTransformerBuilder, 'TabTransformerModel': TabTransformerModel,
+        'RiskManager': RiskManager, 'VectorizedBacktester': VectorizedBacktester,
+        'run_backtrader_backtest': run_backtrader_backtest, 'pd': pd, 'torch': torch,
+        'joblib': joblib, 'tqdm': tqdm, 'StandardScaler': StandardScaler, 'Path': Path,
+        'yaml': yaml, 'json': json,
+        'resolve_data_pipeline_dates': resolve_data_pipeline_dates,
+        'encode_categorical_features': encode_categorical_features,
+        'find_latest_artifact_paths': find_latest_artifact_paths,
+        'walk_forward_split': walk_forward_split,
+    }
+
+    # --- 3. 工作流分发 ---
+    workflow = cfg.get("workflow", "train")
+    print(f"\nINFO: 检测到工作流: '{workflow}'")
+
+    try:
+        if workflow == 'train':
+            run_complete_training_workflow(
+                config=config, modules=modules,
+                use_today_as_end_date=cfg.get("latest", False),
+                run_hpo=not cfg.get("no_hpo", False),
+                force_reprocess_l3=cfg.get("force_reprocess_l3", False),
+                force_retrain_base=cfg.get("force_retrain_base", False),
+                force_retrain_fuser=cfg.get("force_retrain_fuser", False),
+                run_fusion=not cfg.get("no_fusion", False),
+                run_evaluation=cfg.get("evaluation", True),
+                run_visualization=not cfg.get("no_viz", False)
+            )
+        
+        elif workflow == 'predict':
+            ticker_to_predict = cfg.get("ticker", config.get('application', {}).get('application_settings', {}).get('prophet_target_ticker'))
+            if ticker_to_predict:
+                run_single_stock_prediction(config, modules, target_ticker=ticker_to_predict, use_specific_models=cfg.get('models'))
+            else:
+                print("ERROR: 未在命令行或配置文件中指定要预测的股票。用法: python main_train.py workflow=predict ticker=...")
+
+        elif workflow == 'batch_predict':
+            run_batch_prediction_workflow(config, modules)
+
+        elif workflow == 'update':
+            run_periodic_retraining_workflow(config, modules, full_retrain=False)
+        
+        elif workflow == 'full_retrain':
+            run_periodic_retraining_workflow(config, modules, full_retrain=True)
+
+    except Exception as e:
+        print(f"\nFATAL: 在执行工作流 '{workflow}' 期间发生顶级异常: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    print("\n--- 引擎工作流执行完毕。 ---")
+
 # --- 1. 训练工作流 ---
 def run_complete_training_workflow(
     config: dict, 
@@ -1445,91 +1469,4 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
 # --- 命令行执行入口 ---
 
 if __name__ == '__main__':
-    import argparse
-    import sys
-
-    # --- 1. 设置功能丰富、帮助信息清晰的命令行参数解析器 ---
-    parser = argparse.ArgumentParser(
-        description="【量化模型核心引擎】一个集成了训练、预测和自动化更新功能的多功能工具。",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    
-    # 定义主命令 (工作流)
-    parser.add_argument(
-        'workflow', 
-        choices=['train', 'predict', 'batch_predict', 'update', 'full_retrain'], 
-        help=(
-            "要执行的核心工作流:\n"
-            "  train          - (研究) 执行一次完整的、可配置的训练与评估流程。\n"
-            "                 默认使用缓存，不强制重训，用于日常研究和快速迭代。\n\n"
-            "  predict        - (应用) 为单个目标股票生成即时交易决策。\n"
-            "                 自动加载最新模型和最新数据。\n\n"
-            "  batch_predict  - (应用) 为配置文件中的所有股票批量生成交易决策。\n\n"
-            "  update         - (运维) 执行一次【增量更新】。只训练新数据，并重新生成最终模型。\n"
-            "                 适合高频（如每日、每周）的自动化模型迭代。\n\n"
-            "  full_retrain   - (运维) 执行一次【全局重训】。删除所有旧模型并从头开始。\n"
-            "                 适合低频（如每月）或在代码有重大变更后执行。"
-        )
-    )
-    
-    # 定义可选参数
-    parser.add_argument('--ticker', type=str, help="（仅用于 'predict'）要预测的目标股票代码，例如 '600519.SH'。")
-    parser.add_argument('--config', type=str, default='configs/config.yaml', help="指定配置文件的路径 (默认为 'configs/config.yaml')。")
-    parser.add_argument('--models', nargs='+', help="（仅用于 'predict'）指定只使用哪些模型进行预测，例如 --models lgbm lstm。")
-    parser.add_argument('--no-hpo', action='store_true', help="（仅用于 'train'）执行训练，但跳过超参数优化步骤。")
-    parser.add_argument('--no-viz', action='store_true', help="（仅用于 'train'）执行训练，但不生成可视化图表。")
-    parser.add_argument('--no-fusion', action='store_true', help="（仅用于 'train'）执行基础模型训练，但不训练融合模型。")
-    parser.add_argument('--latest', action='store_true', help="（仅用于 'train'）使用今天的日期作为 end_date，覆盖配置文件中的设置。")
-    
-    args = parser.parse_args()
-
-    # --- 2. 在所有操作之前，首先加载环境 ---
-    print("--- 启动量化模型核心引擎 ---")
-    config, modules = run_load_config_and_modules(config_path=args.config)
-    
-    if not (config and modules):
-        print("FATAL: 环境初始化失败，无法执行任何工作流。请检查配置文件路径和模块导入。")
-        sys.exit(1)
-
-    # --- 3. 根据命令行参数分发并执行工作流 ---
-    try:
-        if args.workflow == 'train':
-            # 手动执行的完整训练，通常会运行 HPO 并使用已有的缓存来加速
-            run_complete_training_workflow(
-                config=config, modules=modules,
-                use_today_as_end_date=args.latest, 
-                run_hpo=not args.no_hpo,
-                force_reprocess_l3=False,
-                force_retrain_base=False,
-                force_retrain_fuser=False,
-                run_fusion=not args.no_fusion,
-                run_evaluation=True,
-                run_visualization=not args.no_viz
-            )
-        
-        elif args.workflow == 'predict':
-            ticker_to_predict = args.ticker or config.get('application_settings', {}).get('prophet_target_ticker')
-            if ticker_to_predict:
-                run_single_stock_prediction(config, modules, target_ticker=ticker_to_predict, use_specific_models=args.models)
-            else:
-                print("ERROR: 未在命令行或配置文件中指定要预测的股票。")
-                print("用法示例: python main_train.py predict --ticker 600519.SH")
-
-        elif args.workflow == 'batch_predict':
-            run_batch_prediction_workflow(config, modules)
-
-        elif args.workflow == 'update':
-            # 调用增量更新，full_retrain=False
-            run_periodic_retraining_workflow(config, modules, full_retrain=False)
-        
-        elif args.workflow == 'full_retrain':
-            # 调用全局重训，full_retrain=True
-            run_periodic_retraining_workflow(config, modules, full_retrain=True)
-
-    except Exception as e:
-        print(f"\nFATAL: 在执行工作流 '{args.workflow}' 期间发生顶级异常: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-    print("\n--- 引擎工作流执行完毕。 ---")
+    main()
