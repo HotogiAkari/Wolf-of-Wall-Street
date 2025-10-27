@@ -1,0 +1,27 @@
+# 应用与工具配置
+# @package _group_
+
+# 单点预测工具
+application_settings:
+  prophet_target_ticker: '600519.SH'    # 用于单点预测的目标股票
+
+# 清理设定
+cleanup_settings:
+  # 定义要扫描并清理的路径及其策略。
+  # 策略类型 (strategy):
+  #   - 'by_toplevel_dir_name': 按顶级子目录名与股票代码匹配进行清理 (适用于 processed, models)。
+  #   - 'by_filename_pattern': 按文件名中是否包含股票代码的模式进行递归清理 (适用于 data_cache)。
+  paths:
+    - path: 'data/processed'
+      strategy: 'by_toplevel_dir_name'
+      
+    - path: 'data/models'
+      strategy: 'by_toplevel_dir_name'
+      
+    - path: 'data/data_cache'
+      strategy: 'by_filename_pattern'
+      # (可选) 定义文件名中 ticker 的前后缀模式，{ticker} 是占位符。
+      # safe_ticker 会自动将 '.' 替换为 '_'。
+      pattern: '_{safe_ticker}_'
+      # (可选) 定义哪些文件扩展名或模式适用于此规则。
+      include_patterns: ['raw_*.pkl', 'market_breadth_*.pkl']

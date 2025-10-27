@@ -1,0 +1,30 @@
+# 回测与可视化配置
+# @package _group_
+
+# 回测与业绩评估设定
+backtest_settings:
+  # 当模型预测的未来收益率绝对值超过此阈值时，产生交易信号 (1: 做多, -1: 做空)。
+  backtest_signal_threshold: 0.005 # 0.5%
+
+  # 每次换仓（从多到空，从空到多，从有仓位到空仓）时，扣除的交易成本（双边）。
+  transaction_cost: 0.001   # 0.1%
+
+  # 用于事件驱动回测的参数
+  initial_cash: 500.0  # 初始资金
+  commission_pct: 0.0005  # 单边佣金率 (0.05%)
+
+# 交易与风险
+live_trading_signal_threshold: 0.01        # 信号强度（如预测收益率）超过此阈值才考虑开仓. 
+duplicate_signal_window_min: 5 # N 分钟内不处理对同一标的的同向信号，防止重复下单. 
+price_deviation_zscore: 3.0   # 如果信号触发价相对于近期波动的 Z-score 超过此值，则认为是异常价格跳变并拒绝信号. 
+
+# 可视化配置
+visualization_settings:
+  # ICIR 对比图的颜色配置
+  palette:
+    lgbm: "#49b6ff"
+    lstm: "#ffa915"
+    FUSION: "#2ecc71"
+  
+  # ICIR 对比图的 Y 轴显示范围
+  icir_plot_ylim: [-2.0, 2.0]

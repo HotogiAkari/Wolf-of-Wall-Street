@@ -5,8 +5,11 @@
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from utils.registry import Registry
 from abc import ABC, abstractmethod
 from statsmodels.regression.rolling import RollingOLS
+
+feature_calculator_registry = Registry()
 
 # --- 1. 定义所有特征计算器都必须遵循的标准接口 ---
 class FeatureCalculator(ABC):
@@ -25,45 +28,21 @@ class FeatureCalculator(ABC):
         pass
 
     @property
-    @abstractmethod
     def name(self) -> str:
-        """返回计算器的名称，用于日志记录。"""
-        pass
+        """返回计算器的注册名称。"""
+        # _registry_name 将由装饰器自动附加
+        return getattr(self, '_registry_name', self.__class__.__name__)
 
 # --- 2. 实现具体的特征计算器 ---
 
-class CandlestickPatternCalculator(FeatureCalculator):
-    """
-    根据配置计算指定的K线模式特征。
-    """
-    @property
-    def name(self) -> str:
-        return "Candlestick Patterns"
+# --- base - 基础特征计算器 ---
+# 这些计算器通常只依赖于原始的 OHLCV 数据，没有外部依赖。
 
-    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        required_cols = {'open', 'high', 'low', 'close'}
-        if not required_cols.issubset(df.columns):
-            print(f"WARNNING: [{self.name}] DataFrame is missing required columns. Skipping.")
-            return df
-
-        patterns_to_calc = self.config.get('candlestick_patterns', [])
-        if not patterns_to_calc:
-            print(f"  - [Calculating Features] INFO: No candlestick patterns specified in config. Skipping {self.name}.")
-            return df
-
-        print(f"  - [Calculating Features] Running: {self.name}...")
-        # pandas-ta 会自动将生成的列添加到 df 中
-        df.ta.cdl_pattern(name=patterns_to_calc, append=True)
-        return df
-
+@feature_calculator_registry.register(name="Technical Indicators", phase='base')
 class TechnicalIndicatorCalculator(FeatureCalculator):
     """
     根据配置动态计算技术分析指标。
     """
-    @property
-    def name(self) -> str:
-        return "Technical Indicators"
-
     def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         indicators_to_calc = self.config.get('technical_indicators', [])
         if not indicators_to_calc:
@@ -90,6 +69,32 @@ class TechnicalIndicatorCalculator(FeatureCalculator):
         df.columns = df.columns.str.lower()
         return df
 
+@feature_calculator_registry.register(name="Candlestick Patterns", phase='base')
+class CandlestickPatternCalculator(FeatureCalculator):
+    """
+    根据配置计算指定的K线模式特征。
+    """
+    @property
+    def name(self) -> str:
+        return "Candlestick Patterns"
+
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        required_cols = {'open', 'high', 'low', 'close'}
+        if not required_cols.issubset(df.columns):
+            print(f"WARNNING: [{self.name}] DataFrame is missing required columns. Skipping.")
+            return df
+
+        patterns_to_calc = self.config.get('candlestick_patterns', [])
+        if not patterns_to_calc:
+            print(f"  - [Calculating Features] INFO: No candlestick patterns specified in config. Skipping {self.name}.")
+            return df
+
+        print(f"  - [Calculating Features] Running: {self.name}...")
+        # pandas-ta 会自动将生成的列添加到 df 中
+        df.ta.cdl_pattern(name=patterns_to_calc, append=True)
+        return df
+
+@feature_calculator_registry.register(name="Calendar Features", phase='base')
 class CalendarFeatureCalculator(FeatureCalculator):
     """
     计算日历相关的特征。
@@ -106,7 +111,8 @@ class CalendarFeatureCalculator(FeatureCalculator):
         df['year'] = df.index.year
         df['week_of_year'] = df.index.isocalendar().week.astype(int)
         return df
-    
+
+@feature_calculator_registry.register(name="Statistical Features", phase='base')
 class StatisticalFeatureCalculator(FeatureCalculator):
     """
     统计特征计算器: 提取滑动窗口内的统计特征 (滑动均值, 标准差, 偏度, 峰度, 与收盘价, 成交量等)
@@ -124,6 +130,7 @@ class StatisticalFeatureCalculator(FeatureCalculator):
             df[f'zscore_{w}'] = (df['close'] - df['close'].rolling(w).mean()) / df['close'].rolling(w).std()
         return df
 
+@feature_calculator_registry.register(name="Price Structure Features", phase='base')
 class PriceStructureCalculator(FeatureCalculator):
     """
     价格结构特征计算器: 提取价格行为中的结构性信息: 
@@ -144,6 +151,7 @@ class PriceStructureCalculator(FeatureCalculator):
         df['body_ratio'] = df['body'] / df['range'].replace(0, 1e-8)
         return df
 
+@feature_calculator_registry.register(name="Volume Features", phase='base')
 class VolumeFeatureCalculator(FeatureCalculator):
     """
     成交量行为特征: 补充量价配合类特征，比如：
@@ -167,7 +175,8 @@ class VolumeFeatureCalculator(FeatureCalculator):
         )
         df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
         return df
-    
+
+@feature_calculator_registry.register(name="Trend Regime Features", phase='base')
 class TrendRegimeFeatureCalculator(FeatureCalculator):
     """
     趋势与均衡特征: 使用线性回归/多项式回归拟合价格趋势斜率。
@@ -204,6 +213,7 @@ class TrendRegimeFeatureCalculator(FeatureCalculator):
         df.drop(columns=['time_index'], inplace=True)
         return df
 
+@feature_calculator_registry.register(name="Momentum & Volatility Features", phase='base')
 class MomentumVolatilityCalculator(FeatureCalculator):
     """
     计算动量、波动率与风险调整收益类因子。
@@ -244,6 +254,71 @@ class MomentumVolatilityCalculator(FeatureCalculator):
             
         return df
 
+@feature_calculator_registry.register(name="Advanced Risk Features", phase='base')
+class AdvancedRiskCalculator(FeatureCalculator):
+    """
+    计算更高级的风险指标，如最大回撤。
+    """
+    @property
+    def name(self) -> str:
+        return "Advanced Risk Features"
+
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        if self.config.get('global_settings', {}).get('verbose', True):
+            print(f"  - [Calculating Features] Running: {self.name}...")
+
+        window_sizes = self.config.get('stat_windows', [20, 60, 120]) # 月度、季度、半年度
+
+        for w in window_sizes:
+            # 1. 计算滚动窗口内的最高价
+            rolling_max = df['close'].rolling(window=w, min_periods=1).max()
+            
+            # 2. 计算当前价格相对于滚动最高价的回撤
+            # 公式: (当前价格 / 峰值) - 1。结果是一个负数或零。
+            daily_drawdown = (df['close'] / rolling_max) - 1.0
+            
+            # 3. 找到滚动窗口内的最大回撤
+            # 我们在一个新的滚动窗口内寻找之前计算的 daily_drawdown 的最小值
+            df[f'max_drawdown_{w}d'] = daily_drawdown.rolling(window=w, min_periods=1).min()
+
+        return df
+
+@feature_calculator_registry.register(name="Liquidity & Flow Features", phase='base')
+class LiquidityAndFlowCalculator(FeatureCalculator):
+    """
+    计算流动性与资金流冲击相关的特征。
+    """
+    @property
+    def name(self) -> str:
+        return "流动性与资金流特征"
+
+    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        print(f"  - [计算特征] 正在运行: {self.name}...")
+
+        # 1. 计算 Amihud 非流动性指标
+        daily_return_abs = df['close'].pct_change().abs()
+        # 使用成交额 (volume * close) 更准确，避免低价股的成交量失真
+        turnover = df['volume'] * df['close']
+        
+        # 加上一个极小值防止除以零
+        df['amihud_illiquidity'] = daily_return_abs / (turnover + 1e-9)
+        # 取30日移动平均使其更平滑，观察趋势
+        df['amihud_illiquidity_30d_ma'] = df['amihud_illiquidity'].rolling(30).mean()
+        print(f"    - 已计算: Amihud 非流动性指标")
+
+        # 2. 计算成交量 Z-Score
+        vol_mean_60d = df['volume'].rolling(60).mean()
+        vol_std_60d = df['volume'].rolling(60).std().replace(0, 1e-9) # 防止除以零
+        df['volume_zscore_60d'] = (df['volume'] - vol_mean_60d) / vol_std_60d
+        print(f"    - 已计算: 60日成交量 Z-Score")
+
+        return df
+
+# --- contextual - 情景/外部依赖特征计算器 ---
+# 这些计算器依赖于外部数据，如 Tushare API, 指数价格, 外部市场数据等。
+# 它们必须在 'base' 阶段之后，在数据合并完成之后运行。
+
+@feature_calculator_registry.register(name="Fundamental Features", phase='contextual')
 class FundamentalCalculator(FeatureCalculator):
     """
     从 Tushare Pro 获取基本面因子，如 PE, PB, ROE, 市值等。
@@ -308,6 +383,7 @@ class FundamentalCalculator(FeatureCalculator):
         
         return df
 
+@feature_calculator_registry.register(name="Relative Strength & Beta Features", phase='contextual', requires=['benchmark_close', 'industry_close'])
 class RelativeStrengthCalculator(FeatureCalculator):
     """
     计算个股相对于基准/行业的相对强度和风险暴露(Beta)。
@@ -361,6 +437,7 @@ class RelativeStrengthCalculator(FeatureCalculator):
 
         return df
 
+@feature_calculator_registry.register(name="Market Regime Features", phase='contextual', requires=['benchmark_close'])
 class MarketRegimeCalculator(FeatureCalculator):
     """
     根据基准指数的波动率来定义市场的宏观状态（例如，高波动 vs 低波动）。
@@ -392,34 +469,56 @@ class MarketRegimeCalculator(FeatureCalculator):
 
         return df
 
-class AdvancedRiskCalculator(FeatureCalculator):
+@feature_calculator_registry.register(name="Intermarket Correlation Features", phase='contextual')
+class IntermarketCorrelationCalculator(FeatureCalculator):
     """
-    计算更高级的风险指标，如最大回撤 (Max Drawdown)。
+    计算与一个或多个外部市场的滚动相关性。
     """
     @property
     def name(self) -> str:
-        return "Advanced Risk Features"
+        return "跨市场关联特征"
 
     def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        if self.config.get('global_settings', {}).get('verbose', True):
-            print(f"  - [Calculating Features] Running: {self.name}...")
-
-        window_sizes = self.config.get('stat_windows', [20, 60, 120]) # 月度、季度、半年度
-
-        for w in window_sizes:
-            # 1. 计算滚动窗口内的最高价
-            rolling_max = df['close'].rolling(window=w, min_periods=1).max()
+        external_market_df = kwargs.get('external_market_df')
+        if external_market_df is None or external_market_df.empty:
+            print(f"  - [计算特征] 信息: 未提供外部市场数据，跳过 {self.name}。")
+            return df
             
-            # 2. 计算当前价格相对于滚动最高价的回撤
-            # 公式: (当前价格 / 峰值) - 1。结果是一个负数或零。
-            daily_drawdown = (df['close'] / rolling_max) - 1.0
-            
-            # 3. 找到滚动窗口内的最大回撤
-            # 我们在一个新的滚动窗口内寻找之前计算的 daily_drawdown 的最小值
-            df[f'max_drawdown_{w}d'] = daily_drawdown.rolling(window=w, min_periods=1).min()
+        print(f"  - [计算特征] 正在运行: {self.name}...")
+        
+        stock_ret = df['close'].pct_change()
+        
+        # --- (核心修改) 循环处理所有外部市场的 'close' 列 ---
+        # 我们查找所有以 'close_' 开头的列，例如 'close_SPY', 'close_QQQ'
+        close_cols_external = [col for col in external_market_df.columns if col.startswith('close_')]
 
+        if not close_cols_external:
+            print(f"    - WARNNING: 在提供的 external_market_df 中未找到任何 'close_' 开头的列。跳过。")
+            return df
+
+        for ext_close_col in close_cols_external:
+            # 从列名中提取 Ticker, 例如 'close_SPY' -> 'SPY'
+            ext_ticker = ext_close_col.replace('close_', '')
+            
+            # 创建一个临时的 DataFrame 用于计算，只包含当前外部市场的数据
+            df_merged = pd.DataFrame({'stock_ret': stock_ret}).join(external_market_df[[ext_close_col]])
+            
+            # 计算该外部市场的日收益率
+            df_merged['external_ret'] = df_merged[ext_close_col].pct_change()
+            
+            # 计算滚动相关系数，并在新特征的列名中包含 Ticker
+            corr_col_name = f'corr_with_{ext_ticker}_60d'
+            df[corr_col_name] = df_merged['stock_ret'].rolling(60).corr(df_merged['external_ret'])
+            
+            print(f"    - 已计算: 与 {ext_ticker} 的60日滚动相关性 (列名: {corr_col_name})")
+        
         return df
 
+# --- composite - 复合/依赖型特征计算器 ---
+# 这些计算器依赖于 base 或 contextual 阶段已经计算出的其他特征列。
+# 将它们放在最后可以确保它们的依赖项已经存在。
+
+@feature_calculator_registry.register(name="Crossover Signal Features", phase='composite', requires=['ema_50', 'ema_200', 'macd_12_26_9', 'macds_12_26_9'])
 class CrossoverSignalCalculator(FeatureCalculator):
     """
     计算技术指标的交叉信号，如金叉和死叉。
@@ -469,7 +568,8 @@ class CrossoverSignalCalculator(FeatureCalculator):
             print(f"    - 已计算: {rule_name} (金叉/死叉信号)")
 
         return df
-
+ 
+@feature_calculator_registry.register(name="Candle Quant Features", phase='composite', requires=['BBU_20_2.0', 'BBL_20_2.0', 'range'])
 class CandleQuantCalculator(FeatureCalculator):
     """
     对K线本身进行量化解构，提取更多维度的特征。
@@ -530,80 +630,7 @@ class CandleQuantCalculator(FeatureCalculator):
 
         return df
 
-class IntermarketCorrelationCalculator(FeatureCalculator):
-    """
-    (已重构) 计算与一个或多个外部市场的滚动相关性。
-    """
-    @property
-    def name(self) -> str:
-        return "跨市场关联特征"
-
-    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        external_market_df = kwargs.get('external_market_df')
-        if external_market_df is None or external_market_df.empty:
-            print(f"  - [计算特征] 信息: 未提供外部市场数据，跳过 {self.name}。")
-            return df
-            
-        print(f"  - [计算特征] 正在运行: {self.name}...")
-        
-        stock_ret = df['close'].pct_change()
-        
-        # --- (核心修改) 循环处理所有外部市场的 'close' 列 ---
-        # 我们查找所有以 'close_' 开头的列，例如 'close_SPY', 'close_QQQ'
-        close_cols_external = [col for col in external_market_df.columns if col.startswith('close_')]
-
-        if not close_cols_external:
-            print(f"    - WARNNING: 在提供的 external_market_df 中未找到任何 'close_' 开头的列。跳过。")
-            return df
-
-        for ext_close_col in close_cols_external:
-            # 从列名中提取 Ticker, 例如 'close_SPY' -> 'SPY'
-            ext_ticker = ext_close_col.replace('close_', '')
-            
-            # 创建一个临时的 DataFrame 用于计算，只包含当前外部市场的数据
-            df_merged = pd.DataFrame({'stock_ret': stock_ret}).join(external_market_df[[ext_close_col]])
-            
-            # 计算该外部市场的日收益率
-            df_merged['external_ret'] = df_merged[ext_close_col].pct_change()
-            
-            # 计算滚动相关系数，并在新特征的列名中包含 Ticker
-            corr_col_name = f'corr_with_{ext_ticker}_60d'
-            df[corr_col_name] = df_merged['stock_ret'].rolling(60).corr(df_merged['external_ret'])
-            
-            print(f"    - 已计算: 与 {ext_ticker} 的60日滚动相关性 (列名: {corr_col_name})")
-        
-        return df
-
-class LiquidityAndFlowCalculator(FeatureCalculator):
-    """
-    计算流动性与资金流冲击相关的特征。
-    """
-    @property
-    def name(self) -> str:
-        return "流动性与资金流特征"
-
-    def calculate(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        print(f"  - [计算特征] 正在运行: {self.name}...")
-
-        # 1. 计算 Amihud 非流动性指标
-        daily_return_abs = df['close'].pct_change().abs()
-        # 使用成交额 (volume * close) 更准确，避免低价股的成交量失真
-        turnover = df['volume'] * df['close']
-        
-        # 加上一个极小值防止除以零
-        df['amihud_illiquidity'] = daily_return_abs / (turnover + 1e-9)
-        # 取30日移动平均使其更平滑，观察趋势
-        df['amihud_illiquidity_30d_ma'] = df['amihud_illiquidity'].rolling(30).mean()
-        print(f"    - 已计算: Amihud 非流动性指标")
-
-        # 2. 计算成交量 Z-Score
-        vol_mean_60d = df['volume'].rolling(60).mean()
-        vol_std_60d = df['volume'].rolling(60).std().replace(0, 1e-9) # 防止除以零
-        df['volume_zscore_60d'] = (df['volume'] - vol_mean_60d) / vol_std_60d
-        print(f"    - 已计算: 60日成交量 Z-Score")
-
-        return df
-    
+@feature_calculator_registry.register(name="Contextual & Interaction Features", phase='composite', requires=['regime_is_uptrend', 'regime_is_high_vol'])
 class ContextualFeatureCalculator(FeatureCalculator):
     """
     情景感知与交叉特征计算器。
@@ -657,42 +684,35 @@ class ContextualFeatureCalculator(FeatureCalculator):
             
         return df
 
-# 创建注册表和运行器
-# 注意: ALL_CALCULATORS 列表中的顺序为数据处理顺序。
-# 1. 基础指标 (TechnicalIndicatorCalculator, PriceStructureCalculator) 必须先运行。
-# 2. 依赖于基础指标的计算器 (CrossoverSignalCalculator, CandleQuantCalculator) 必须在后面。
-# 3. 依赖于外部数据 (如 benchmark_close) 的计算器 (RelativeStrengthCalculator, ContextualFeatureCalculator)
-#    应该在数据合并之后，但通常没有严格的先后顺序。
-# 4. ContextualFeatureCalculator (交叉特征) 应该在它所依赖的基础特征计算完毕后运行。
-ALL_CALCULATORS = [
-    TechnicalIndicatorCalculator,
-    CalendarFeatureCalculator,
-    CandlestickPatternCalculator,
-    StatisticalFeatureCalculator,
-    PriceStructureCalculator,
-    VolumeFeatureCalculator,
-    TrendRegimeFeatureCalculator,
-    MomentumVolatilityCalculator,
-    FundamentalCalculator,
-    RelativeStrengthCalculator,
-    MarketRegimeCalculator,
-    AdvancedRiskCalculator,
-    CrossoverSignalCalculator, 
-    CandleQuantCalculator,
-    IntermarketCorrelationCalculator,
-    LiquidityAndFlowCalculator,
-    ContextualFeatureCalculator,
-]
-
 def run_all_feature_calculators(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:
     """
-    实例化并按顺序运行所有已注册的特征计算器。
+    (可扩展版) 实例化并按指定阶段顺序运行所有已注册的特征计算器。
     """
     print("INFO: 开始特征计算流水线...")
     df_copy = df.copy()
-    for calculator_class in ALL_CALCULATORS:
+    
+    # 从 config 中读取执行阶段的顺序，如果未定义则使用默认顺序
+    calculator_phases = config.get('strategy_config', {}).get(
+        'calculator_phases', 
+        ['base', 'contextual', 'composite'] # 默认顺序
+    )
+    
+    print(f"  - 将按以下阶段顺序执行计算器: {calculator_phases}")
+    
+    # 从注册器中获取排序好的计算器类列表
+    calculators_to_run = feature_calculator_registry.get_registered_items(phases=calculator_phases)
+    
+    for calculator_class in calculators_to_run:
         calculator = calculator_class(config)
-        # 将 kwargs 传递给每个 calculate 方法
-        df_copy = calculator.calculate(df_copy, **kwargs) 
+        
+        # 检查依赖项是否满足
+        details = feature_calculator_registry._item_details.get(calculator.name, {})
+        missing_reqs = details.get('requires', set()) - set(df_copy.columns)
+        if missing_reqs:
+            print(f"    - WARNNING: 计算器 '{calculator.name}' 缺少依赖特征 {missing_reqs}，可能计算失败或不准确。跳过。")
+            continue
+            
+        df_copy = calculator.calculate(df_copy, **kwargs)
+        
     print("INFO: 特征计算流水线结束。")
     return df_copy

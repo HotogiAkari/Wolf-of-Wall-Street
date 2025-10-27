@@ -1,0 +1,81 @@
+# @package _group_
+
+# 全局 HPO 设置 (作为回退的默认值)
+n_trials: 20                  # 全局默认的试验次数.
+hpo_num_eval_folds: 2         # 全局默认的 HPO 内部评估验证集数量.
+
+# 指定一个股票子集来运行 HPO.
+tickers_for_hpo:
+  - '000100.SZ'
+
+# 定义要进行 HPO 的模型列表
+models_for_hpo:
+  - 'lgbm'
+  - 'lstm'
+
+# --- LGBM 专属 HPO 配置 ---
+lgbm_hpo_config:
+  # [整数] 覆盖全局设置，为 LGBM 设置 n 轮试验.
+  n_trials: 20
+  # [整数] LGBM 在 HPO 内部评估时使用的 folds 数.
+  hpo_num_eval_folds: 5
+  
+  # HPO 流程中，LGBM 使用的【固定】参数.
+  # 这些参数不参与搜索，但会覆盖 default_model_params 中的同名参数.
+  params:
+    # [整数] HPO 期间限制 CPU 核心数
+    n_jobs: 8
+    # [整数] 设为 -1，彻底关闭 LightGBM 的 C++ 内核日志.
+    verbose: -1
+    # [整数] HPO 期间使用更短的早停轮次，加速搜索.
+    early_stopping_rounds: 10
+    # [整数] HPO 期间关闭 Python 回调函数的迭代日志 (设为 0 或 -1).
+    verbose_period: 0
+    
+  # LGBM 的超参数【搜索空间】.
+  # 格式: [类型, 最小值, 最大值, (可选)是否对数].
+  # 特殊规则: 将[最小值, 最大值]设为[0, 0]代表使用 hpo_utils.py 中定义的“无限制”默认范围.
+  search_space:
+    # [整数] 一棵树上的最大叶子节点数. 控制模型复杂度. 建议范围 [20, 150].
+    num_leaves: ["int", 20, 80]
+    # [浮点数, 对数] 学习率. 控制每次迭代的步长. 建议范围 [0.001, 0.1].
+    learning_rate: ["float", 0.001, 0.1, true]
+    # [整数] 一个叶子节点上所需的最少样本数. 用于防止过拟合. 建议范围 [20, 200].
+    min_child_samples: ["int", 20, 100]
+    # [浮点数] 建树时随机选择的特征比例. 建议范围 [0.6, 1.0].
+    feature_fraction: ["float", 0.6, 1.0, false]
+    # [浮点数] 建树时随机选择的数据比例（行采样）. 建议范围 [0.6, 1.0].
+    bagging_fraction: ["float", 0.6, 1.0, false]
+    # [浮点数, 对数] L1 正则化. 有助于产生稀疏特征权重. 建议范围 [1e-3, 10.0].
+    reg_alpha: ["float", 0.01, 10.0, true]
+    # [浮点数, 对数] L2 正则化. 防止模型权重过大. 建议范围 [1e-3, 10.0].
+    reg_lambda: ["float", 0.01, 10.0, true]
+
+# --- LSTM 专属 HPO 配置 ---
+lstm_hpo_config:
+  # [整数] 为 LSTM 设置较少的试验次数，因为它训练速度慢.
+  n_trials: 20
+  # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以加速.
+  hpo_num_eval_folds: 5
+  
+  # HPO 流程中，LSTM 使用的【固定】参数.
+  params:
+    # [整数] HPO 期间关闭 Epoch 日志.
+    verbose_period: 0
+    # [整数] HPO 期间使用更激进的早停轮次.
+    early_stopping_rounds_lstm: 15
+    
+  # LSTM 的超参数【搜索空间】.
+  # 格式: [类型, ...].
+  search_space:
+    # [浮点数, 对数] 学习率. LSTM 对此非常敏感. 建议范围 [1e-4, 1e-2].
+    learning_rate: ["float", 0.0001, 0.02, true]
+    
+    # [分类] 第一个 LSTM 隐藏层的神经元数量. 从给定的列表中选择一个.
+    units_1: ["categorical", [32, 64, 128]]
+    
+    # [分类] 第二个 LSTM 隐藏层的神经元数量.
+    units_2: ["categorical", [16, 32, 64]]
+    
+    # [浮点数] Dropout 比例，防止过拟合. 建议范围 [0.1, 0.5].
+    dropout: ["float", 0.1, 0.5, false]

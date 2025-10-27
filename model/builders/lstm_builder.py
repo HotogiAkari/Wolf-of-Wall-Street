@@ -13,8 +13,8 @@ import torch.nn as nn
 from tqdm.autonotebook import tqdm
 from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
-from model.builders.base_builder import BaseBuilder
 from torch.optim.lr_scheduler import LinearLR, ReduceLROnPlateau
+from model.builders.base_builder import BaseBuilder, builder_registry
 
 class LSTMModel(nn.Module):
     """定义 PyTorch LSTM 模型结构。"""
@@ -32,7 +32,8 @@ class LSTMModel(nn.Module):
         out = h_n.squeeze(0); out = self.dropout2(out)
         out = self.fc(out)
         return out
-
+    
+@builder_registry.register('lstm')
 class LSTMBuilder(BaseBuilder):
     """LSTM 模型的构建器，适配全局预处理流程。"""
     def __init__(self, config: Dict[str, Any]):

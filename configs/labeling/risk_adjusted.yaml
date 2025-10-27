@@ -1,0 +1,6 @@
+# 风险调整收益率标签法配置
+# @package _group_
+
+labeling_method: 'raw_return' # 标签生成方法. 可选值: 'raw_return' (推荐, 默认) 或 'alpha'. raw 使用未来的原始收益率作为预测目标. alpha 使用 Fama-French 三因子模型计算超额收益 (Alpha) 作为预测目标, 需要 Tushare Pro API 的支持. 若获取因子失败,会退回raw.
+labeling_horizon: 45          # 定义标签的预测周期，即模型需要预测未来 N 天的收益率. 
+

@@ -9,10 +9,10 @@ import torch.nn as nn
 from tqdm.autonotebook import tqdm
 from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
-from model.builders.base_builder import BaseBuilder
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from utils.encoding_utils import encode_categorical_features
+from model.builders.base_builder import BaseBuilder, builder_registry
 
 class TabTransformerModel(nn.Module):
     """
@@ -62,6 +62,7 @@ class TabTransformerModel(nn.Module):
         x_combined = torch.cat([x_transformer_out, x_cont], dim=1)
         return self.mlp(x_combined)
 
+@builder_registry.register('tabtransformer')
 class TabTransformerBuilder(BaseBuilder):
     """
     TabTransformer 模型的完整构建器。
@@ -233,7 +234,6 @@ class TabTransformerBuilder(BaseBuilder):
         cont_features = [c for c in X_full.columns if c not in cat_features]
 
         # --- 2. 类别特征编码 ---
-        # 我们需要一个虚拟的 df_val 来满足 _encode_categorical_features 的接口
         X_full_encoded, _, encoders = encode_categorical_features(X_full.copy(), X_full.head(1).copy(), cat_features)
         
         # --- 3. 只对连续特征进行标准化 ---
@@ -252,7 +252,7 @@ class TabTransformerBuilder(BaseBuilder):
         p = self.model_params
         model = TabTransformerModel(
             num_continuous=len(cont_features),
-            cat_dims=cat_dims, # <-- 使用正确的 cat_dims
+            cat_dims=cat_dims,
             dim=self.model_params.get('dim', 32),
             depth=self.model_params.get('depth', 4),
             heads=self.model_params.get('heads', 4),
@@ -296,7 +296,6 @@ class TabTransformerBuilder(BaseBuilder):
             }
         }
 
-        # (核心修改) 将返回值包装成标准化的字典
         return {
             'model': model,
             'scaler': final_scaler,

@@ -1,5 +1,15 @@
-# 统一配置文件
-# 本文件是整个项目的中央控制台，所有实验参数都在此定义. 
+# 统一配置文件 
+
+# --- 1. 默认实验组合 ---
+defaults:
+  - data: default
+  - features: default
+  - labeling: raw_return
+  - model: lgbm
+  - hpo: default
+  - backtest: default
+  - application: default
+  - _self_
 
 # --- 1. 全局设定 ---
 # 这部分参数定义了项目的基本环境和全局行为. 
@@ -7,6 +17,7 @@ global_settings:
   seed: 64                            # 全局随机种子. 用于保证所有涉及随机性的操作（如模型训练, 数据采样）的结果都可以被复现. 
   device: 'gpu'                       # 默认计算设备. 'gpu' 会优先使用 CUDA，如果不可用则自动切换到 'cpu'. 'cpu' 则强制使用 CPU. 
   num_cpu_cores_for_data: '4'         # 用于控制 NumPy/SciPy/Scikit-learn 底层计算库（如 MKL, OpenBLAS）使用的线程数
+  # 核心目录路径
   model_dir: 'data/models'            # 存放所有已训练模型, scaler 和 IC 历史记录的主目录.
   hpo_log_dir: 'data/hpo_logs'        # HPO 结果日志的存放目录.
   l3_cache_dir: 'data/l3_cache'       # L3 预处理数据的缓存目录
@@ -15,357 +26,29 @@ global_settings:
   raw_ohlcv_cache_dir: 'raw_ohlcv'    # 在 data_cache_dir 下存放原始 OHLCV 数据的子目录名. 
   ic_history_file: 'ic_history.csv'   # 训练结束后，用于保存所有模型聚合后 IC 历史记录的文件名. 
   order_history_db: 'data/runtime_data/order_history.db' # 交易历史 SQLite 数据库的文件名，由 risk_manager 使用. 用于防止重复下单和追踪订单状态
+  
+  # 模型与版本控制
   num_model_versions_to_keep: 3       # 模型版本控制. 对于每只股票的每个模型，只保留最近的 N 个版本，旧版本会被自动清理. 
   use_lstm_globally: True             # 是否为股票训练LSTM模型(每只股票可以单独定义)
   use_tabtransformer_globally: True   # 是否为股票训练TabTransformer模型(每只股票可以单独定义)
 
+  # API Token
   tushare_api_token: 'TUSHARE_TOKEN' # 请在这里填入Tushare Token
   
+  # 核心目标与模型列表
   # 定义本次运行要训练的模型类型列表. 可以只写 ['lgbm'] 或 ['lstm'] 来单独训练某个模型. 
   models_to_train: ['lgbm', 'lstm', 'tabtransformer'] 
-  
   # 定义 LGBM 分位数回归模型要预测的分位数. 0.5 代表中位数，是核心的点预测. 
   quantiles: [0.05, 0.5, 0.95]
-  
   # 定义标签列（即预测目标）在 DataFrame 中的列名. 
   label_column: 'label_return'
 
-# --- 2. 策略与数据设定 ---
-# 这部分参数定义了数据范围, 验证方法和特征工程的核心逻辑. 
-strategy_config:
-  # 数据与回测周期
-  end_date: '2025-09-30'        # 所有数据获取和分析的结束日期. 
-  data_lookback_years: 15      # ：数据回溯的年限
-  earliest_start_date: '2005-01-01' # 最早可接受的数据起始日期. 
-  benchmark_ticker: 'sh.000300' # 对比基准指数的代码 (用于计算相对强度等特征)，格式需符合 Baostock API 要求. 
-  
-  # Walk-Forward (滚动窗口) 验证策略
-  train_window: 250             # 初始/滚动训练窗口的大小（交易日）. 
-  val_window: 45                # 验证窗口的大小，也作为每次滚动的步长（交易日）(训练模型的预测天数). 
-  
-  # 特征工程参数
-  labeling_horizon: 45          # 定义标签的预测周期，即模型需要预测未来 N 天的收益率. 
-  correlation_window: 120       # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小. 
-  correlation_threshold: 0.95   # 初步特征筛选的阈值. 如果两个特征的相关性绝对值高于此值，则会移除其中一个，以减少共线性. 
-  ffill_limit: 10               # 前向填充缺失值的最大连续天数. 用于处理节假日等造成的少量数据空洞. 
-  labeling_method: 'raw_return' # 标签生成方法. 可选值: 'raw_return' (推荐, 默认) 或 'alpha'. raw 使用未来的原始收益率作为预测目标. alpha 使用 Fama-French 三因子模型计算超额收益 (Alpha) 作为预测目标, 需要 Tushare Pro API 的支持. 若获取因子失败,会退回raw.
-  
-  # 交易与风险 (用于未来实盘)
-  signal_threshold: 0.01        # 信号强度（如预测收益率）超过此阈值才考虑开仓. 
-  duplicate_signal_window_min: 5 # N 分钟内不处理对同一标的的同向信号，防止重复下单. 
-  price_deviation_zscore: 3.0   # 如果信号触发价相对于近期波动的 Z-score 超过此值，则认为是异常价格跳变并拒绝信号. 
-  
-  # 为统计特征计算器提供窗口尺寸
-  # 用于 StatisticalFeatureCalculator
-  stat_windows: [5, 10, 20, 30, 45, 60]     # [整数列表] 定义计算滑动统计特征时使用的多个窗口尺寸（单位：交易日）. 计算过去 x 日的收益率
-  # 用于 TrendRegimeFeatureCalculator
-  trend_window: 45                  # [整数] 定义计算价格趋势斜率时使用的线性回归窗口大小（单位：交易日）. 值越大，捕捉的趋势越长；值越小，对短期趋势变化越敏感. 
-  # 用于 MomentumVolatilityCalculator
-  momentum_windows: [3, 6, 12]      # [整数列表] 定义计算动量/波动率类因子时使用的窗口期（单位：月）
-  # 配置K线形态 用于 CandlestickPatternCalculator
-  candlestick_patterns:
-    - "doji"                # 十字星：犹豫信号，可能反转
-    - "hammer"              # 锤子线：底部反转信号
-    - "engulfing"           # 吞没形态：趋势切换信号
-    - "shootingstar"        # 流星线：顶部反转信号
-    - "morningstar"         # 晨星形态：底部反转信号
-    - "eveningstar"         # 黄昏星形态：顶部反转信号
-    # 强力趋势与动量形态
-    - "3whitesoldiers"      # 三白兵：强烈的看涨反转/持续信号
-    - "3blackcrows"         # 三只乌鸦：强烈的看跌反转/持续信号
-    - "marubozu"            # 光头光脚：单方向的极致动量信号
-    # 趋势持续形态
-    # - "rising3methods"      # 上升三法：强看涨持续信号
-    # - "falling3methods"     # 下降三法：强看跌持续信号
-    # 经典反转形态
-    - "harami"              # 孕线形态：趋势动力减弱信号
-    - "piercing"            # 刺透形态：底部反转信号
-    - "darkcloudcover"      # 乌云盖顶：顶部反转信号
-  # 配置技术指标 (用于 TechnicalIndicatorCalculator), 这是计算金叉/死叉的基础
-  technical_indicators:
-    # === 趋势类指标 ===
-    - name: "ema"                     # 指数移动平均线
-      params: {"length": 10}
-    - name: "ema"
-      params: {"length": 30}
-    - name: "ema"
-      params: { "length": 50 }
-    - name: "ema"
-      params: { "length": 200 }
-    - name: "sma"                     # 简单移动平均线 (趋势基础线)
-      params: {"length": 20}
-    - name: "dema"                    # 双指数移动平均线 (更快响应价格变化)
-      params: {"length": 20}
-    - name: "tema"                    # 三重指数移动平均线 (进一步减少滞后)
-      params: {"length": 20}
-    - name: "adx"                     # 平均趋向指标 (反映趋势强度)
-      params: {"length": 14}
-    # === 动量类指标 ===
-    - name: "rsi"                     # 相对强弱指标 (超买/超卖判断)
-      params: {"length": 14}
-    - name: "stoch"                   # 随机震荡指标 (短期反转信号)
-      params: {"k": 14, "d": 3, "smooth_k": 3}
-    - name: "macd"                    # 移动平均收敛发散指标 (趋势反转)
-      params: {"fast": 12, "slow": 26, "signal": 9}
-    - name: "ppo"                     # 百分比价格振荡器 (MACD 的百分比版本)
-      params: {"fast": 12, "slow": 26}
-    - name: "roc"                     # 价格变化率 (短期涨跌速率)
-      params: {"length": 10}
-    - name: "mom"                     # 动量指标 (衡量价格上升或下降的速度)
-      params: {"length": 10}
-    # === 波动性类指标 ===
-    - name: "bbands"                  # 布林带 (价格波动区间与突破信号)
-      params: {"length": 20, "std": 2}
-    - name: "atr"                     # 平均真实波幅 (衡量市场波动程度)
-      params: {"length": 14}
-    - name: "natr"                    # 归一化平均真实波幅 (波动率标准化)
-      params: {"length": 14}
-    - name: "donchian"                # 唐奇安通道 (高低突破检测)
-      params: {"lower_length": 20, "upper_length": 20}
-    # === 成交量类指标 ===
-    - name: "obv"                     # 能量潮指标 (量价配合确认趋势)
-      params: {}
-    - name: "mfi"                     # 资金流量指标 (带成交量的 RSI)
-      params: {"length": 14}
-    - name: "vwap"                    # 成交量加权平均价 (机构参考价)
-      params: {}
-    # === 市场结构类指标 ===
-    - name: "psar"                    # 抛物线转向指标 (判断趋势反转点)
-      params: {"acceleration": 0.02, "maximum": 0.2}
-    - name: "ichimoku"                # 一目均衡表 (未来支撑阻力与趋势云)
-      params: {"tenkan": 9, "kijun": 26, "senkou": 52}
-  # 配置交叉信号 (用于 CrossoverSignalCalculator)
-  crossover_signals:
-    - name: "ema_50_200"
-      fast: "ema_50"
-      slow: "ema_200"
-    - name: "macd_signal"
-      fast: "macd_12_26_9"
-      slow: "macds_12_26_9"
-  # 外部市场对标, 可以是美股ETF, 黄金ETF, 债券ETF等, 代码需符合 yfinance 标准. 用于 IntermarketCorrelationCalculator
-  external_market_tickers:
-    - "SPY"       # 标普500 ETF, 代表美股大盘
-    - "QQQ"     # 纳斯达克100 ETF, 代表科技股
-    - "GLD"     # 黄金ETF, 代表避险情绪
-    - "TLT"     # 美国20+年国债ETF, 代表利率和风险偏好
-
-# 回测与业绩评估设定
-backtest_settings:
-  # 当模型预测的未来收益率绝对值超过此阈值时，产生交易信号 (1: 做多, -1: 做空)。
-  signal_threshold: 0.005 # 0.5%
-
-  # 每次换仓（从多到空，从空到多，从有仓位到空仓）时，扣除的交易成本（双边）。
-  transaction_cost: 0.001   # 0.1%
-
-  # 用于事件驱动回测的参数
-  initial_cash: 500.0  # 初始资金
-  commission_pct: 0.0005  # 单边佣金率 (0.05%)
-
-# --- 3. HPO (超参数优化) 设定 ---
-hpo_config:
-  # 全局 HPO 设置 (作为回退的默认值)
-  n_trials: 20                  # 全局默认的试验次数. 
-  hpo_num_eval_folds: 2         # 全局默认的 HPO 内部评估验证集数量. 
-  tickers_for_hpo: ['000100.SZ']  # 指定一个股票子集来运行 HPO. 
-  models_for_hpo: ['lgbm', 'lstm']                          # 定义要进行 HPO 的模型列表
-  
-  # --- LGBM 专属 HPO 配置 ---
-  lgbm_hpo_config:
-    n_trials: 20                # [整数] 覆盖全局设置，为 LGBM 设置 n 轮试验. 
-    hpo_num_eval_folds: 5       # [整数] LGBM 在 HPO 内部评估时使用的 folds 数. 
-    
-    # HPO 流程中，LGBM 使用的【固定】参数. 这些参数不参与搜索，但会覆盖 default_model_params 中的同名参数. 
-    params:
-      n_jobs: 8                   # [整数] HPO 期间限制 CPU 核心数
-      verbose: -1                 # [整数] 设为 -1，彻底关闭 LightGBM 的 C++ 内核日志. 
-      early_stopping_rounds: 10   # [整数] HPO 期间使用更短的早停轮次，加速搜索. 
-      verbose_period: 0           # [整数] HPO 期间关闭 Python 回调函数的迭代日志 (设为 0 或 -1). 
-      
-    # LGBM 的超参数【搜索空间】. 
-    # 格式: [类型, 最小值, 最大值, (可选)是否对数]. 
-    # 特殊规则: 将[最小值, 最大值]设为[0, 0]代表使用 hpo_utils.py 中定义的“无限制”默认范围. 
-    search_space:
-      num_leaves: ["int", 20, 80]                   # [整数] 一棵树上的最大叶子节点数. 控制模型复杂度. 建议范围 [20, 150]. 
-      learning_rate: ["float", 0.001, 0.1, true]    # [浮点数, 对数] 学习率. 控制每次迭代的步长. 建议范围 [0.001, 0.1]. 
-      min_child_samples: ["int", 20, 100]           # [整数] 一个叶子节点上所需的最少样本数. 用于防止过拟合. 建议范围 [20, 200]. 
-      feature_fraction: ["float", 0.6, 1.0, false]  # [浮点数] 建树时随机选择的特征比例. 建议范围 [0.6, 1.0]. 
-      bagging_fraction: ["float", 0.6, 1.0, false]  # [浮点数] 建树时随机选择的数据比例（行采样）. 建议范围 [0.6, 1.0]. 
-      reg_alpha: ["float", 0.01, 10.0, true]        # [浮点数, 对数] L1 正则化. 有助于产生稀疏特征权重. 建议范围 [1e-3, 10.0]. 
-      reg_lambda: ["float", 0.01, 10.0, true]       # [浮点数, 对数] L2 正则化. 防止模型权重过大. 建议范围 [1e-3, 10.0]. 
-  
-  # --- LSTM 专属 HPO 配置 ---
-  lstm_hpo_config:
-    n_trials: 20                # [整数] 为 LSTM 设置较少的试验次数，因为它训练速度慢. 
-    hpo_num_eval_folds: 5       # [整数] LSTM 评估使用的 folds 数. 也可以设为 1 以加速. 
-    
-    # HPO 流程中，LSTM 使用的【固定】参数. 
-    params:
-      verbose_period: 0           # [整数] HPO 期间关闭 Epoch 日志. 
-      early_stopping_rounds_lstm: 15 # [整数] HPO 期间使用更激进的早停轮次. 
-      
-    # LSTM 的超参数【搜索空间】. 
-    # 格式: [类型, ...]. 
-    search_space:
-      # [浮点数, 对数] 学习率. LSTM 对此非常敏感. 建议范围 [1e-4, 1e-2]. 
-      learning_rate: ["float", 0.0001, 0.02, true]
-      
-      # [分类] 第一个 LSTM 隐藏层的神经元数量. 从给定的列表中选择一个. 
-      units_1: ["categorical", [32, 64, 128]]
-      
-      # [分类] 第二个 LSTM 隐藏层的神经元数量. 
-      units_2: ["categorical", [16, 32, 64]]
-      
-      # [浮点数] Dropout 比例，防止过拟合. 建议范围 [0.1, 0.5]. 
-      dropout: ["float", 0.1, 0.5, false]
-
-# --- 4. 默认模型超参数 ---
-# 这是所有模型参数的“基准线”. 个股可以在股票池中覆盖这些参数. 
-default_model_params:
-  lgbm_params:
-    device: 'gpu'
-    n_jobs: 8                   # 限制 CPU 核心数为 8
-    verbose: -1                 # 控制 C++ 内核日志
-    verbose_period: 10000      # 表示主训练时，每 n 轮打印一次验证集损失
-    n_estimators: 50000           # 树的最大数量. 通常设置一个很大的值，由早停法来决定最佳数量. 
-    feature_fraction: 0.8005786090055831       # 每次迭代时，随机选择 80% 的特征来建树. 用于防止过拟合. 
-    learning_rate: 0.030297480627572117        # 学习率或步长. 较小的值需要更多的树，但通常能达到更好的效果. 
-    min_child_samples: 49       # 一个叶子节点上所需的最少样本数. 用于防止过拟合. 
-    num_leaves: 18              # 一棵树上的最大叶子节点数. 是控制模型复杂度的关键参数. 
-    reg_alpha: 1.136126759483552              # L1 正则化. 
-    reg_lambda: 2.027927483904424            # L2 正则化. 
-    bagging_fraction: 0.8       # 每次迭代时，随机选择 80% 的数据来建树（行采样）. 用于防止过拟合. 
-    bagging_freq: 1             # 每 1 次迭代执行一次 bagging. 
-    early_stopping_rounds: 5000 # 早停法. 如果在验证集上的表现连续 N 轮没有提升，则停止训练. 
-  
-  lstm_params:
-    num_workers: 8              # DataLoader 使用的并行加载进程数 (使用核心数), 设为 0 表示只使用主进程加载（速度慢）
-    verbose_period: 10        # 表示主训练时，每 n 轮打印一次验证集损失
-    sequence_length: 120         # 输入 LSTM 模型的时间序列长度（即用过去 N 天的数据来预测未来）. 
-    epochs: 75                  # 最大的训练轮次. 通常由早停法提前终止. 
-    final_model_epochs: 50      # 最终模型训练的固定轮次
-    batch_size: 128             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
-    learning_rate: 0.0001       # 优化器（如 Adam）的学习率. 
-    warmup_steps: 10             # 前 N 轮进行学习率预热
-    plateau_patience: 20     # ReduceLROnPlateau 的耐心轮次
-    plateau_factor: 0.5      # ReduceLROnPlateau 降低学习率的因子 (new_lr = lr * factor)
-    units_1: 32                 # LSTM 第一个隐藏层的神经元数量. 
-    units_2: 64                 # LSTM 第二个隐藏层的神经元数量. 
-    dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合. 
-    early_stopping_rounds_lstm: 50 # LSTM 的早停法耐心轮次. 
-    precision: 16               # 控制 LSTM 的训练精度(float16 或 float32). 从32修改为16需重新运行数据预处理.
-
-  tabtransformer_params:
-    categorical_features: ['day_of_week', 'month', 'regime_is_uptrend', 'regime_is_high_vol']   # 定义哪些特征是类别特征 (必须是整数编码)
-    
-    # 训练参数
-    verbose_period: 10          # 表示主训练时，每 n 轮打印一次验证集损失
-    epochs: 100                 # 最大的训练轮次. 通常由早停法提前终止.
-    final_model_epochs: 50      # 最终模型训练的固定轮次
-    batch_size: 256             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
-    learning_rate: 0.005        # 优化器（如 Adam）的学习率. 
-    early_stopping_rounds: 20   # 早停法耐心轮次.
-    
-    # 模型结构参数
-    dim: 32       # Embedding 和 Transformer 的内部维度
-    depth: 4      # Transformer 层的数量
-    heads: 4      # 多头注意力的头的数量
-    dropout: 0.1  # Dropout 比例
-
-
-  fuser_params:
-    type: 'elastic_net'             # 元模型类型: 'elastic_net' (推荐), 'ridge' (线性，稳健) 或 'mlp' (非线性，更复杂). 
-    alpha: 0.0001                # 如果使用 Ridge，此为正则化强度. 值越大，正则化越强，模型越简单. 
-    l1_ratio: 0.5            # (仅 ElasticNet) L1 正则化的比例 (0=Ridge, 1=Lasso)。0.5 是一个很好的平衡点。
-    stability_threshold: 0.5  # IC 稳定性分数的阈值（变异系数）. 交叉验证的 IC 标准差/均值 > 此值，则认为模型不稳定并回退. 
-    pred_clip: 0.05           # 预测结果限幅. 使用 tanh 将最终输出限制在 ±5% 以内，防止极端信号. 
-    smooth_window: 3          # 实盘防抖动平滑窗口. 对最近 N 次的预测取平均，使信号输出更平滑. 设为 1 则不平滑. 
-    verbose: True             # 是否打印融合模型在训练和预测时的详细日志. 
-    
-# --- 5. 股票池与个股专属配置 ---
-# 定义要处理的所有股票. 每个条目都可以选择性地覆盖上面的任何默认参数. 
-stocks_to_process:
-
-  - ticker: '000100.SZ'
-    keyword: 'TCL科技'
-    industry_etf: '159928.SZ'
-    # 可以在此处定制 LGBM 模型 (覆盖默认参数)
-    lgbm_params:
-      bagging_fraction: 0.9375083434979039
-      feature_fraction: 0.77595798993269
-      learning_rate: 0.008524148589354073
-      min_child_samples: 88
-      num_leaves: 51
-      reg_alpha: 0.015652327376092165
-      reg_lambda: 3.403661756226349
-    lstm_params:
-      dropout: 0.2576424753656927
-      learning_rate: 0.0110839281978312
-      units_1: 32
-      units_2: 64
-  
-  - ticker: '000426.SZ'
-    keyword: '兴业矿业'
-    industry_etf: '159915.SZ'   # 有色金属 / 矿业 ETF 示例
-
-  - ticker: '002083.SZ'
-    keyword: '孚日股份'
-    industry_etf: '159825.SZ'   # 中证全指轻工制造ETF，可代表家纺与轻工产业
-
-  - ticker: '000150.SZ'
-    keyword: '宜华健康'
-    industry_etf: '512170.SH'   # 医疗ETF，对应医药与健康服务行业
-
-  - ticker: '300013.SZ'
-    keyword: '新宁物流'
-    industry_etf: '159928.SZ'
-
-  - ticker: '300242.SZ'
-    keyword: '佳云科技'
-    industry_etf: '159939.SZ'   # 互联网ETF，因佳云主营为互联网营销业务
-
-  - ticker: '002006.SZ'
-    keyword: '精功科技'
-    industry_etf: '512480.SH'   # 机械装备制造ETF
-
-# --- 6. 可视化配置 ---
-visualization_settings:
-  # ICIR 对比图的颜色配置
-  palette:
-    lgbm: "#49b6ff"
-    lstm: "#ffa915"
-    FUSION: "#2ecc71"
-  
-  # ICIR 对比图的 Y 轴显示范围
-  icir_plot_ylim: [-2.0, 2.0]
-
-baostock_index_constituent_map:
-  "sh.000300": "query_hs300_stocks"
-  "sz.399300": "query_hs300_stocks"
-  "sh.000905": "query_zz500_stocks"
-  "sz.399905": "query_zz500_stocks"
-  "sh.000016": "query_sz50_stocks"
-  "sz.399006": "query_cyb_stocks"
-
-# --- 7. 应用层设定 ---
-application_settings:
-  prophet_target_ticker: '600519.SH'    # 用于单点预测的目标股票
-
-cleanup_settings:
-  # 定义要扫描并清理的路径及其策略。
-  # 策略类型 (strategy):
-  #   - 'by_toplevel_dir_name': 按顶级子目录名与股票代码匹配进行清理 (适用于 processed, models)。
-  #   - 'by_filename_pattern': 按文件名中是否包含股票代码的模式进行递归清理 (适用于 data_cache)。
-  paths:
-    - path: 'data/processed'
-      strategy: 'by_toplevel_dir_name'
-      
-    - path: 'data/models'
-      strategy: 'by_toplevel_dir_name'
-      
-    - path: 'data/data_cache'
-      strategy: 'by_filename_pattern'
-      # (可选) 定义文件名中 ticker 的前后缀模式，{ticker} 是占位符。
-      # safe_ticker 会自动将 '.' 替换为 '_'。
-      pattern: '_{safe_ticker}_'
-      # (可选) 定义哪些文件扩展名或模式适用于此规则。
-      include_patterns: ['raw_*.pkl', 'market_breadth_*.pkl']
+# --- 3. 为 Hydra 预留的空配置组 ---
+# Hydra 会将 defaults 中加载的内容填充到这里。
+data: {}
+features: {}
+labeling: {}
+model: {}
+hpo: {}
+backtest: {}
+application: {}

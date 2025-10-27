@@ -158,9 +158,13 @@ def run_training_for_ticker(
         for i, fold_data in fold_iterator:
             if i < start_fold_idx: continue
             
-            artifacts, ic_series_fold, oof_fold_df, fold_stats = builder.train_and_evaluate_fold(
-                train_df=None, val_df=None, cached_data=fold_data
+            fold_results = builder.train_and_evaluate_fold(
+                cached_data=fold_data
             )
+            
+            ic_series_fold = fold_results.get('ic_series')
+            oof_fold_df = fold_results.get('oof_preds')
+            fold_stats = fold_results.get('fold_stats', {})
             
             if ic_series_fold is not None and not ic_series_fold.empty:
                 ic_series_fold.to_csv(ic_history_path, mode='a', header=not ic_history_path.exists(), index=False)
@@ -197,14 +201,17 @@ def run_training_for_ticker(
             joblib.dump(final_artifacts['scaler'], scaler_file)
             
             if model_type in ['lstm', 'tabtransformer']:
+                # PyTorch Builder 返回的是 model 对象，我们需要取它的 state_dict()
                 torch.save(final_artifacts['model'].state_dict(), model_file)
                 meta_file = model_dir / f"{model_type}_meta_{version_date}.json"
-                with open(meta_file, 'w', encoding='utf-8') as f: json.dump(final_artifacts['metadata'], f, indent=4)
+                with open(meta_file, 'w', encoding='utf-8') as f:
+                    json.dump(final_artifacts['metadata'], f, indent=4)
                 if 'encoders' in final_artifacts:
                     encoders_file = model_dir / f"{model_type}_encoders_{version_date}.pkl"
                     joblib.dump(final_artifacts['encoders'], encoders_file)
             else: # lgbm
-                joblib.dump(final_artifacts['models'], model_file)
+                # LGBM Builder 返回的是一个包含了多个模型的字典
+                joblib.dump(final_artifacts['model'], model_file)
                 if 'metadata' in final_artifacts:
                     meta_file = model_dir / f"{model_type}_meta_{version_date}.json"
                     with open(meta_file, 'w', encoding='utf-8') as f:

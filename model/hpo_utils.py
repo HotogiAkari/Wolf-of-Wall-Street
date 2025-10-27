@@ -114,13 +114,15 @@ def objective(trial, preprocessed_folds: list, config: dict, model_type: str = '
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             
-            # 接收 4 个返回值
-            _, ic_series_fold, _, _ = builder.train_and_evaluate_fold(
-                train_df=None, val_df=None, cached_data=fold_data
+            fold_results = builder.train_and_evaluate_fold(
+                cached_data=fold_data
             )
             
+            ic_series_fold = fold_results.get('ic_series')
+            
             if ic_series_fold is not None and not ic_series_fold.empty:
-                ic_scores.append(ic_series_fold['rank_ic'].iloc[0])
+                if 'rank_ic' in ic_series_fold.columns:
+                    ic_scores.append(ic_series_fold['rank_ic'].iloc[0])
     
     if not ic_scores or np.isnan(ic_scores).all():
         return -10.0

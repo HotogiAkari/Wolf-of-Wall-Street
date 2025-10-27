@@ -3,6 +3,9 @@
 import pandas as pd
 from typing import Any, Dict
 from abc import ABC, abstractmethod
+from utils.registry import SimpleRegistry
+
+builder_registry = SimpleRegistry()
 
 class BaseBuilder(ABC):
     """

@@ -6,8 +6,9 @@ import lightgbm as lgb
 from typing import Any, Dict, Tuple
 from lightgbm.callback import early_stopping
 from sklearn.preprocessing import StandardScaler
-from model.builders.base_builder import BaseBuilder
+from model.builders.base_builder import BaseBuilder, builder_registry
 
+@builder_registry.register('lgbm')
 class LGBMBuilder(BaseBuilder):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
