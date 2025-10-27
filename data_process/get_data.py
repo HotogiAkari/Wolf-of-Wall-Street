@@ -1,8 +1,6 @@
 # 文件路径: data_process/get_data.py
 import re
-import json
 import time
-import yaml
 import numpy as np
 import pandas as pd
 import tushare as ts

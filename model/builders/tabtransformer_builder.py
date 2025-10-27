@@ -1,4 +1,4 @@
-# 文件路径: model_builder/tabtransformer_builder.py
+# 文件路径: model/builder/tabtransformer_builder.py
 
 import gc
 import copy

@@ -1,4 +1,4 @@
-# 文件路径: model_builders/lgbm_builder.py
+# 文件路径: model/builders/lgbm_builder.py
 
 import warnings
 import pandas as pd

@@ -1,7 +1,7 @@
-# model/builders/utils.py
+# 文件路径: utils/encoding_utils.py
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 
 def encode_categorical_features(df_train: pd.DataFrame, df_val: pd.DataFrame, cat_features: list) -> tuple:

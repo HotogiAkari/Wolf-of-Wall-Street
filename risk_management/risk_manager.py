@@ -1,4 +1,4 @@
-# 文件路径: data_process/risk_manager.py
+# 文件路径: risk_management/risk_manager.py
 
 import uuid
 import sqlite3

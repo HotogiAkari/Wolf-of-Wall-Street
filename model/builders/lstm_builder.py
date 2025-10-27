@@ -1,4 +1,4 @@
-# 文件路径: model_builders/lstm_builder.py
+# 文件路径: model/builders/lstm_builder.py
 '''
 LSTM模型构建
 '''

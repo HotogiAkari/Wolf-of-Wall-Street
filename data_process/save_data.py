@@ -51,8 +51,6 @@ def get_processed_data_path(stock_info: dict, config: dict) -> Path:
     output_dir_base = global_settings.get('output_dir', 'data/processed')
     ticker = stock_info['ticker']
     
-    # 新的目录结构：{output_dir}/{ticker}/{config_hash}/
-    # 文件名固定为 features.pkl
     target_dir = Path(output_dir_base) / ticker / config_hash
     return target_dir / "features.pkl"
 
@@ -93,7 +91,7 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
             # 1. 保存数据文件
             df.to_pickle(target_file_path)
             
-            # 2. (新增) 保存元数据文件
+            # 2. 保存元数据文件
             meta_data = {
                 'ticker': ticker,
                 'keyword': keyword,
