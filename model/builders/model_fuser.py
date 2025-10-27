@@ -1,14 +1,12 @@
-# 文件路径: model_builder/model_fuser.py
+# 文件路径: model/builder/model_fuser.py
 
 import json
 import joblib
 import random
-import inspect
 import datetime
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from scipy.stats import spearmanr
 from sklearn.metrics import make_scorer
 from sklearn.linear_model import Ridge
 from sklearn.linear_model import ElasticNet
@@ -21,12 +19,13 @@ from typing import Dict, List, Optional, Union
 
 class ModelFuser:
     """
-    (已重构) 生产级模型融合器，集成了版本化、随机数控制、输出平滑、
+    生产级模型融合器，集成了版本化、随机数控制、输出平滑、
     在线监控和多种元模型选项。
     """
-    def __init__(self, ticker: str, config: Dict):
+    def __init__(self, ticker: str, config: Dict, version: str = None):
         self.ticker = ticker
         self.config = config
+        self.version = version
         self.meta_model: Optional[Union[Ridge, ElasticNet, MLPRegressor]] = None
         self.scaler: Optional[StandardScaler] = None
         self.is_trained = False
@@ -37,9 +36,14 @@ class ModelFuser:
         self.model_dir = Path(config.get('global_settings', {}).get('model_dir', 'models')) / ticker
         self.model_dir.mkdir(parents=True, exist_ok=True)
         
-        self.fuser_path = self.model_dir / "fuser_model.pkl"
-        self.scaler_path = self.model_dir / "fuser_scaler.pkl"
-        self.meta_path = self.model_dir / "fuser_meta.json"
+        if self.version:
+            self.fuser_path = self.model_dir / f"fuser_model_{self.version}.pkl"
+            self.scaler_path = self.model_dir / f"fuser_scaler_{self.version}.pkl"
+            self.meta_path = self.model_dir / f"fuser_meta_{self.version}.json"
+        else: # 回退到无版本模式，用于加载旧模型或预测
+            self.fuser_path = self.model_dir / "fuser_model.pkl"
+            self.scaler_path = self.model_dir / "fuser_scaler.pkl"
+            self.meta_path = self.model_dir / "fuser_meta.json"
 
         fuser_config = self.config.get('default_model_params', {}).get('fuser_params', {})
         self.verbose = fuser_config.get('verbose', True)
@@ -62,7 +66,7 @@ class ModelFuser:
         model_dir = Path(self.config.get('global_settings', {}).get('model_dir', 'models')) / self.ticker
         
         oof_files = list(model_dir.glob("*_oof_preds.csv"))
-        if len(oof_files) < 1: # 至少需要一个模型
+        if len(oof_files) < 1:
             if self.verbose: print(f"WARNNING: 未找到任何 OOF 预测文件。")
             return None
             
@@ -79,44 +83,67 @@ class ModelFuser:
     def train(self):
         if self.verbose: print(f"\n--- 正在为 {self.ticker} 训练融合元模型... ---")
         
-        # a. 查找所有 OOF 文件
+        # --- 1. 获取 OOF 文件 ---
         oof_files = list(self.model_dir.glob("*_oof_preds.csv"))
-        if len(oof_files) < 2: # 至少需要两个模型才能融合
+        if len(oof_files) < 2:
             if self.verbose: print(f"INFO: 找到的 OOF 预测文件少于2个。无法训练融合模型。")
             self.use_fallback = True; return
 
-        # b. 分别加载 y_pred 和 y_true
-        all_y_preds = []
-        all_y_trues = []
-        
+        # --- 2. 健壮地加载、去重和合并 ---
+        all_oof_dfs = []
         for oof_path in oof_files:
             model_type = oof_path.name.replace('_oof_preds.csv', '')
-            df = pd.read_csv(oof_path, parse_dates=['date']).set_index('date')
-            
-            # 收集 y_pred
-            if 'y_pred' in df.columns:
-                all_y_preds.append(df[['y_pred']].rename(columns={'y_pred': f'pred_{model_type}'}))
-            
-            # 收集 y_true
-            if 'y_true' in df.columns:
-                all_y_trues.append(df[['y_true']].rename(columns={'y_true': f'y_true_{model_type}'}))
+            try:
+                df = pd.read_csv(oof_path, parse_dates=['date'])
+                
+                df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last')
+                df = df.set_index('date')
+                
+                # 重命名列以区分模型
+                df = df.rename(columns={
+                    'y_pred': f'pred_{model_type}',
+                    'y_true': f'y_true_{model_type}'
+                })
+                all_oof_dfs.append(df)
+            except Exception as e:
+                if self.verbose: print(f"WARNNING: 加载或处理 OOF 文件 {oof_path.name} 时失败: {e}")
 
-        if not all_y_preds or not all_y_trues:
-            if self.verbose: print("ERROR: 未能从 OOF 文件中加载任何 y_pred 或 y_true 数据。")
+        if len(all_oof_dfs) < 2:
+            if self.verbose: print(f"ERROR: 成功加载的 OOF 文件不足2个。")
+            return
+
+        combined_df = pd.concat(all_oof_dfs, axis=1, join='outer')
+        
+        if combined_df.index.has_duplicates:
+             combined_df = combined_df.groupby(combined_df.index).last()
+        
+        # --- 3. 提取和验证 y_true ---
+        y_true_cols = [c for c in combined_df.columns if c.startswith('y_true_')]
+        if not y_true_cols:
+            if self.verbose: print("ERROR: 未能从 OOF 文件中加载任何 y_true 数据。")
             return
             
-        # c. 合并并验证 y_true 的一致性
-        y_true_df_combined = pd.concat(all_y_trues, axis=1)
-        # 检查所有 y_true_* 列是否都相同
-        if y_true_df_combined.shape[1] > 1 and not y_true_df_combined.apply(lambda x: x.nunique() <= 1, axis=1).all():
-            print("WARNNING: 来自不同模型的 OOF 文件的 y_true 标签不一致！这可能表明数据存在问题。将使用第一列作为基准。")
+        y_true_df_combined = combined_df[y_true_cols]
+        y_true_filled = y_true_df_combined.ffill(axis=1).bfill(axis=1)
+        if y_true_filled.shape[1] > 1 and not (y_true_filled.iloc[:, 0] == y_true_filled.iloc[:, -1]).all():
+            print("WARNNING: 来自不同模型的 OOF 文件的 y_true 标签不一致！将使用第一列作为基准。")
+
+        y_meta = y_true_filled.iloc[:, 0].rename('y_true')
+
+        # --- 4. 准备 X_meta 和对齐 ---
+        pred_cols = [c for c in combined_df.columns if c.startswith('pred_')]
+        X_meta = combined_df[pred_cols]
         
-        # d. 最终确定 y_true 和 all_oof_preds
-        y_true_df = y_true_df_combined.iloc[:, [0]].rename(columns={y_true_df_combined.columns[0]: 'y_true'})
-        all_oof_preds = pd.concat(all_y_preds, axis=1)
+        # 将 X 和 y 对齐，并删除两边都有 NaN 的行
+        aligned_data = pd.concat([X_meta, y_meta], axis=1).dropna(subset=pred_cols, how='all').dropna(subset=['y_true'])
         
-        aligned_data = all_oof_preds.join(y_true_df, how='inner').dropna()
+        X_meta = aligned_data[pred_cols]
+        y_meta = aligned_data['y_true']
         
+        # 填充 X_meta 中的缺失值，可用0填充，或行均值填充
+        X_meta.fillna(0, inplace=True) 
+
+        # --- 5. 训练逻辑 ---
         if len(aligned_data) < 50:
             if self.verbose: print(f"WARNNING: 对齐样本量过少 ({len(aligned_data)} < 50)，无法训练融合模型。")
             return
@@ -205,42 +232,50 @@ class ModelFuser:
             print(f"ERROR: 保存融合构件失败: {e}"); self.is_trained = False
 
     def load(self) -> bool:
-        """加载已训练的融合模型、Scaler 和元信息。"""
+        """
+        加载已训练的融合模型、Scaler 和元信息。
+        如果加载成功，则更新实例状态；如果失败，则保持实例为未训练状态。
+        """
+        # ---调试
+        if self.verbose:
+            print(f"  - [DIAGNOSTIC] Fuser.load() called. Checking for path: {self.fuser_path.resolve()}")
+            print(f"  - [DIAGNOSTIC] File exists? {self.fuser_path.exists()}. "
+                  f"Scaler exists? {self.scaler_path.exists()}")
+        # ---
         if self.fuser_path.exists() and self.scaler_path.exists():
             try:
-                self.meta_model = joblib.load(self.fuser_path)
-                self.scaler = joblib.load(self.scaler_path)
-                if not (hasattr(self.meta_model, "coef_") or hasattr(self.meta_model, "intercept_")):
-                    raise ValueError("加载的元模型无效（可能未训练）。")
+                loaded_model = joblib.load(self.fuser_path)
+                loaded_scaler = joblib.load(self.scaler_path)
+                
+                # 进行一次健全性检查
+                if not hasattr(loaded_model, "predict"):
+                    raise ValueError("加载的模型对象无效，缺少 'predict' 方法。")
+
+                # 只有在所有检查都通过后，才更新实例的属性
+                self.meta_model = loaded_model
+                self.scaler = loaded_scaler
                 self.is_trained = True
-                print(f"SUCCESS: 融合模型及 Scaler 已成功加载。")
-                if self.meta_path.exists():
-                    with open(self.meta_path, 'r', encoding='utf-8') as f:
-                        meta = json.load(f)
-                    print(f"  - 元信息: 模型于 {meta.get('trained_at')} 训练, CV IC={meta.get('cv_mean_ic', 0):.4f}")
+                
+                if self.verbose: 
+                    version_str = f" (版本 {self.version})" if self.version else ""
+                    print(f"SUCCESS: 融合构件{version_str}已成功加载。")
                 return True
-            except Exception as e:
-                print(f"ERROR: 加载融合构件时发生错误: {e}")
-        return False
-        
-    def load(self) -> bool:
-        """(已更新) 加载模型。如果模型不存在，则保持初始化的空模型状态。"""
-        if self.fuser_path.exists() and self.scaler_path.exists():
-            try:
-                self.meta_model = joblib.load(self.fuser_path)
-                self.scaler = joblib.load(self.scaler_path)
-                self.is_trained = True
-                if self.verbose: print(f"SUCCESS: 融合构件已加载。")
-                return True
+                
             except Exception as e: 
-                if self.verbose: print(f"ERROR: 加载融合构件失败: {e}")
-                # 加载失败时，重置为初始状态，以备后续训练
-                self.__init__(self.ticker, self.config) 
+                if self.verbose: 
+                    version_str = f" (版本 {self.version})" if self.version else ""
+                    print(f"ERROR: 加载融合构件{version_str}失败: {e}")
+                
+                self.meta_model = None
+                self.scaler = None
                 self.is_trained = False
+                return False
         else:
-            if self.verbose: print("INFO: 未找到已训练的融合模型文件，将使用新初始化的模型。")
-            self.is_trained = False # 明确表示未经过批量训练
-        return self.is_trained
+            if self.verbose: 
+                version_str = f" (版本 {self.version})" if self.version else ""
+                print(f"INFO: 未找到已训练的融合模型文件{version_str}。")
+            self.is_trained = False
+            return False
 
     def predict(self, preds: Dict[str, float]) -> float:
         """对一组新的基础模型预测进行融合，包含平滑和边界保护。"""
@@ -296,7 +331,7 @@ class ModelFuser:
         
     def update_online_ic(self, y_true_batch: list, y_pred_batch: list, window: int = 30) -> float:
         """
-        (增强版) 接收一批真实值和预测值，更新并返回滚动窗口内的在线 IC。
+        接收一批真实值和预测值，更新并返回滚动窗口内的在线 IC。
         """
         if len(y_true_batch) != len(y_pred_batch):
             raise ValueError("y_true 和 y_pred 的长度必须一致。")

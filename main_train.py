@@ -14,6 +14,8 @@ from tqdm.autonotebook import tqdm
 from utils.file_utils import find_latest_artifact_paths
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+torch.set_float32_matmul_precision('high')
+
 # --- 内部辅助函数 ---
 def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use_specific_models: list = None) -> dict:
     """
@@ -134,10 +136,20 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
     
     # --- 3. 加载通用构件 ---
     try:
-        artifacts['fuser'] = ModelFuser(target_ticker, config)
-        if not artifacts['fuser'].load(): print(f"  - WARNNING: 未能加载 ModelFuser，将回退到简单平均。")
+        latest_fuser_paths = find_latest_artifact_paths(model_dir, 'fuser')
+
+        fuser_version = latest_fuser_paths.get('timestamp')
+        artifacts['fuser'] = ModelFuser(target_ticker, config, version=fuser_version)
+
+        if not artifacts['fuser'].load(): 
+            print(f"  - WARNNING: 未能加载 ModelFuser (版本 {fuser_version})，将回退到简单平均。")
+
         db_path = config.get('global_settings', {}).get('order_history_db', 'order_history.db')
         artifacts['risk_manager'] = RiskManager(db_path=db_path)
+    except FileNotFoundError:
+        print("  - WARNNING: 未找到任何版本的 ModelFuser 文件。将回退到简单平均。")
+        artifacts['fuser'] = ModelFuser(target_ticker, config)
+        artifacts['fuser'].use_fallback = True
     except Exception as e:
         print(f"    - ERROR: 加载 Fuser 或 RiskManager 失败: {e}")
 
@@ -156,8 +168,8 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
     
     try:
         from data_process.get_data import (
-            _get_us_stock_data_yf, _get_macroeconomic_data_cn, 
-            _get_market_sentiment_data_ak, _generate_market_breadth_data, _get_fama_french_factors
+            _get_macroeconomic_data_cn, _get_market_sentiment_data_ak, 
+            _generate_market_breadth_data, _get_fama_french_factors
         )
     except ImportError:
         print("WARNNING: 无法直接从 data_process.get_data 导入内部函数。")
@@ -201,17 +213,16 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
             
             strategy_config = config.get('strategy_config', {})
             
-            market_breadth_df = _generate_market_breadth_data(start_date_str_global, end_date_str_global, cache_dir)
+            market_breadth_df = _generate_market_breadth_data(start_date_str_global, end_date_str_global, cache_dir, config=config)
             
             all_external_dfs = []
-            # ... (循环加载所有外部市场数据的逻辑不变)
             external_market_df = pd.concat(all_external_dfs, axis=1) if all_external_dfs else None
             
             market_sentiment_df = _get_market_sentiment_data_ak(start_date_str_global, end_date_str_global, cache_dir)
             macro_df = _get_macroeconomic_data_cn(start_date_str_global, end_date_str_global, config)
             factors_df = _get_fama_french_factors(start_date_str_global, end_date_str_global)
 
-            # c. (新增) 保存新的全局数据缓存
+            # c. 保存新的全局数据缓存
             global_data_to_cache = {
                 'market_breadth_df': market_breadth_df, 'external_market_df': external_market_df,
                 'market_sentiment_df': market_sentiment_df, 'macro_df': macro_df, 'factors_df': factors_df
@@ -1040,9 +1051,13 @@ def run_all_models_train(config: dict, modules: dict,
         if run_fusion and base_models_succeeded_count == len(models_to_train):
             print(f"\n--- 2.3.5 为 {keyword} ({ticker}) 训练融合模型 ---")
             try:
-                fuser = ModelFuser(ticker, config)
+                end_date_str = config.get('strategy_config', {}).get('end_date', 'unknown_date')
+                version_date = pd.to_datetime(end_date_str).strftime('%Y%m%d')
+
+                fuser = ModelFuser(ticker, config, version=version_date)
+
                 if not force_retrain_fuser and fuser.meta_path.exists():
-                    print(f"INFO: {keyword} ({ticker}) 的融合模型元数据已存在。跳过训练。")
+                    print(f"INFO: {keyword} ({ticker}) 的融合模型元数据 (版本 {version_date}) 已存在。跳过训练。")
                 else:
                     fuser.train()
             except Exception as e:

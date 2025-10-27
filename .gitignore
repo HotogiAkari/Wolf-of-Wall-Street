@@ -6,3 +6,4 @@ data_cache/
 models/
 Guide.md
 Guide2.md
+.gitignore
