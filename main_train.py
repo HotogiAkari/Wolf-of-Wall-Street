@@ -1,5 +1,4 @@
 # 文件路径: main_train.py
-# 职责: 封装并执行完整的、非交互式的模型研究与训练流水线。
 
 import os
 import sys
@@ -233,7 +232,6 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
             print("    - SUCCESS: 新的全局数据缓存已生成并保存。")
         
         # --- 2. 为目标股票获取特征 (使用已加载或新生成的全局数据) ---
-        # 即使全局数据来自缓存，个股的最新数据仍然需要动态获取
         max_lookback_days_stock = 365 * 2
         end_date_dt_stock = pd.Timestamp.now()
         start_date_dt_stock = end_date_dt_stock - pd.DateOffset(days=max_lookback_days_stock)
@@ -376,6 +374,7 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     print("\n--- 步骤5：计算涨跌概率 ---")
     prob_up, prob_down = None, None
     '''
+    # 暂时没有模型...
     if lgbm_preds and all(k in lgbm_preds for k in ['q_0.05', 'q_0.95']):
         try:
             from scipy.stats import norm
@@ -487,25 +486,6 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
         plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.show()
     except Exception as e:
         print(f"WARNNING: 绘图时发生错误: {e}"); import traceback; traceback.print_exc()
-
-def _encode_categorical_features(df_train: pd.DataFrame, df_val: pd.DataFrame, cat_features: list) -> tuple:
-    """
-    (公共工具函数) 对类别特征进行安全的标签编码。
-    """
-    encoders = {}
-    df_train_encoded, df_val_encoded = df_train.copy(), df_val.copy()
-
-    for col in cat_features:
-        if col not in df_train_encoded.columns: continue
-        le = LabelEncoder()
-        df_train_encoded[col] = le.fit_transform(df_train_encoded[col].astype(str))
-        known_classes = set(le.classes_)
-        if '<unknown>' not in known_classes:
-            le.classes_ = np.append(le.classes_, '<unknown>')
-        df_val_encoded[col] = df_val_encoded[col].astype(str).apply(lambda x: x if x in known_classes else '<unknown>')
-        df_val_encoded[col] = le.transform(df_val_encoded[col])
-        encoders[col] = le
-    return df_train_encoded, df_val_encoded, encoders
 
 # --- 0. 环境与模块加载 ---
 
@@ -773,7 +753,7 @@ def run_hpo_train(config: dict, modules: dict):
     pd = modules['pd']
     Path = modules['Path']
     yaml = modules['yaml']
-    joblib = modules['joblib'] # <-- 新增
+    joblib = modules['joblib']
     run_hpo_for_ticker = modules['run_hpo_for_ticker']
 
     hpo_config = config.get('hpo_config', {})
@@ -949,15 +929,15 @@ def run_all_models_train(config: dict, modules: dict,
     tqdm = modules['tqdm']
     run_training_for_ticker = modules['run_training_for_ticker']
     ModelFuser = modules['ModelFuser']
-    Path = modules['Path'] # <-- 新增
-    joblib = modules['joblib'] # <-- 新增
+    Path = modules['Path']
+    joblib = modules['joblib']
 
     global_settings = config.get('global_settings', {})
     strategy_config = config.get('strategy_config', {})
     default_model_params = config.get('default_model_params', {})
     stocks_to_process = config.get('stocks_to_process', [])
     
-    # --- 2. (核心修改) 获取 L3 缓存目录路径 ---
+    # --- 2. 获取 L3 缓存目录路径 ---
     l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/l3_cache')
     L3_CACHE_DIR = Path(l3_cache_dir_path)
 
@@ -982,7 +962,7 @@ def run_all_models_train(config: dict, modules: dict,
         if not ticker:
             continue
         
-        # --- 5. (核心修改) Just-in-Time 加载 L3 缓存 ---
+        # --- 5. Just-in-Time 加载 L3 缓存 ---
         stock_l3_cache_path = L3_CACHE_DIR / f"{ticker}.joblib"
         if not stock_l3_cache_path.exists():
             tqdm.write(f"\nERROR: 未找到 {ticker} 的 L3 缓存文件，跳过该股票的训练。")
@@ -999,7 +979,7 @@ def run_all_models_train(config: dict, modules: dict,
         # 从加载的数据中获取 full_df
         full_df = cached_stock_data['full_df']
         
-        # --- 6. 基础模型训练 (后续逻辑不变，只是数据源变了) ---
+        # --- 6. 基础模型训练 ---
         print(f"\n--- 2.3.1 为 {keyword} ({ticker}) 训练基础模型 ---")
         base_models_succeeded_count = 0
         for model_type in models_to_train:
@@ -1024,7 +1004,6 @@ def run_all_models_train(config: dict, modules: dict,
                     print(f"WARNNING: 未找到 {keyword} ({ticker}) 的 '{model_type}' 预处理 folds。跳过训练。")
                     continue
 
-                # 注意这里，我们将 full_df 注入到 run_config 中
                 run_config = {
                     'global_settings': global_settings, 'strategy_config': strategy_config,
                     'default_model_params': default_model_params, 'stocks_to_process': [stock_info],
@@ -1047,7 +1026,7 @@ def run_all_models_train(config: dict, modules: dict,
             except Exception as e:
                 print(f"\nERROR: 为 {keyword} ({ticker}) 训练 {model_type.upper()} 模型时发生严重错误: {e}")
         
-        # --- 7. 融合模型训练 (逻辑完全不变) ---
+        # --- 7. 融合模型训练 ---
         if run_fusion and base_models_succeeded_count == len(models_to_train):
             print(f"\n--- 2.3.5 为 {keyword} ({ticker}) 训练融合模型 ---")
             try:
@@ -1083,7 +1062,7 @@ def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list
     ModelFuser = modules.get('ModelFuser')
     tqdm = modules.get('tqdm')
     VectorizedBacktester = modules.get('VectorizedBacktester')
-    run_backtrader_backtest = modules.get('run_backtrader_backtest') # <-- 核心修复点
+    run_backtrader_backtest = modules.get('run_backtrader_backtest')
 
     global_settings = config.get('global_settings', {})
     stocks_to_process = config.get('stocks_to_process', [])
@@ -1197,8 +1176,6 @@ def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list
                 with open(meta_path, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
                 
-                # 构建 L1 缓存的路径
-                # 注意：此处的 'raw_{ticker}_{start}_{end}.pkl' 格式需要与 get_data.py 中的 _get_ohlcv_data_bs 函数的缓存文件名格式严格一致
                 ticker_bs_format = stock_info.get('ticker', '').replace('.', '_')
                 raw_data_path = Path(config['global_settings']['data_cache_dir']) / 'raw_ohlcv' / f"raw_{ticker_bs_format}_{meta['data_start_date']}_{meta['data_end_date']}.pkl"
                 
@@ -1216,16 +1193,13 @@ def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list
 
     print("\n--- 评估阶段成功完成。 ---")
     
-    # 将所有结果返回给主工作流
     return evaluation_summary, vectorized_summary, final_eval_df
 
 def run_results_visualization(config: dict, modules: dict, evaluation_summary: pd.DataFrame, backtest_summary: pd.DataFrame, final_eval_df: pd.DataFrame):
     """
-    (新增) 对已计算的评估结果进行可视化。
+    对已计算的评估结果进行可视化。
     """
-    print("\n" + "="*80)
     print("=== 工作流阶段 2.4b：生成评估可视化图表 ===")
-    print("="*80)
     try:
         import matplotlib.pyplot as plt
         import seaborn as sns
@@ -1237,13 +1211,11 @@ def run_results_visualization(config: dict, modules: dict, evaluation_summary: p
 
     vis_settings = config.get('visualization_settings', {})
     custom_palette = vis_settings.get('palette', {"lgbm": "#49b6ff", "lstm": "#ffa915", "FUSION": "#2ecc71"})
-    icir_plot_ylim = vis_settings.get('icir_plot_ylim', [-2.0, 2.0])
 
     if evaluation_summary is not None and not evaluation_summary.empty:
         print("\n--- 生成 ICIR 对比图 ---")
         fig, ax = plt.subplots(figsize=(20, 10))
         sns.barplot(data=evaluation_summary, x='ticker_name', y='icir', hue='model_type', palette=custom_palette, ax=ax)
-        # (美化代码)
         plt.show()
 
     if final_eval_df is not None and not final_eval_df.empty:
@@ -1317,7 +1289,7 @@ def run_complete_training_workflow(
     按顺序执行完整的、非交互式的训练流水线。
     """
     """
-    (主函数1) 按顺序执行完整的、非交互式的训练工作流。
+    按顺序执行完整的、非交互式的训练工作流。
     """
     print("=== 主工作流：启动完整模型训练 ===")
     try:
@@ -1370,9 +1342,8 @@ def run_batch_prediction_workflow(config: dict, modules: dict):
             successful_predictions += 1
         except Exception as e:
             keyword = stock_info.get('keyword', ticker)
-            print(f"\n--- ERROR: 在为 {keyword} ({ticker}) 进行预测时发生严重错误 ---")
+            print(f"\n--- ERROR: 在为 {keyword} ({ticker}) 进行预测时发生错误 ---")
             print(e)
-            # 即使一只股票失败，也继续处理下一只
             continue
             
     print(f"\n=== 批量预测工作流执行完毕。成功预测 {successful_predictions} / {len(stocks_to_predict)} 只股票。 ===")
@@ -1380,18 +1351,18 @@ def run_batch_prediction_workflow(config: dict, modules: dict):
 # --- 3. 自动化更新工作流 ---
 def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: False):
     """
-    (主函数3) 执行周期性的、自动化的模型再训练工作流。
+    执行周期性的、自动化的模型再训练工作流。
     """
     workflow_type = "全局再训练 (Full Retrain)" if full_retrain else "增量更新 (Incremental Update)"
 
     print("=== 主工作流：启动周期性再训练 ===")
 
-        # --- (核心新增) 1. 智能前置检查 ---
+        # --- 1. 智能前置检查 ---
     print("\n--- 步骤0：检查是否需要更新 ---")
     
     pd, Path, os, json = modules['pd'], modules['Path'], __import__('os'), modules['json']
     
-    # a. 选择一个代表性的股票来进行检查 (通常是列表中的第一个)
+    # a. 选择一个股票来进行检查
     stocks_to_process = config.get('stocks_to_process', [])
     if not stocks_to_process:
         print("WARNNING: 股票池为空，跳过更新。"); return
@@ -1411,7 +1382,6 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
         last_train_time = pd.to_datetime(fuser_meta.get('trained_at'))
 
         # c. 获取数据的最后更新时间 (从 L1 缓存)
-        # 我们需要找到最新的 L1 缓存文件
         cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
         raw_ohlcv_dir = cache_dir / 'raw_ohlcv'
         
@@ -1427,11 +1397,10 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
             print(f"  - 数据的最后更新时间: {last_data_update_time}")
             
             # d. 对比时间
-            # 我们增加一个小的 buffer (例如1分钟)，以避免因文件系统时间精度问题导致的误判
             if last_data_update_time <= (last_train_time + pd.Timedelta(minutes=1)) and not full_retrain:
                 print("\nSUCCESS: 数据自上次成功训练以来未发生变化。无需执行更新。")
                 print("=== 周期性更新工作流已跳过。 ===")
-                return # <-- 关键：提前退出
+                return
 
     # 1. 动态更新配置
     print("\n--- 步骤1：动态更新配置 ---")
@@ -1443,7 +1412,7 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
     print(f"\n--- 步骤2：启动 [{workflow_type}] 流水线 ---")
 
     if full_retrain:
-        # 模式一：全局重训练 (破坏性)
+        # 模式一：全局重训练
         print("INFO: 将执行完整的、破坏性的全局再训练。")
         run_complete_training_workflow(
             config=config, 
@@ -1454,10 +1423,10 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
             force_retrain_base=True,    # 重训基础模型
             force_retrain_fuser=True,   # 重训融合模型
             run_evaluation=True,        # 重训后需要记录完整性能
-            run_visualization=True     # 生成图表
+            run_visualization=True      # 生成图表
         ) 
     else:
-        # 模式二：增量更新 (非破坏性，默认)
+        # 模式二：增量更新
         print("INFO: 将执行非破坏性的增量更新。")
         run_complete_training_workflow(
             config=config, 
@@ -1480,7 +1449,7 @@ if __name__ == '__main__':
     # --- 1. 设置功能丰富、帮助信息清晰的命令行参数解析器 ---
     parser = argparse.ArgumentParser(
         description="【量化模型核心引擎】一个集成了训练、预测和自动化更新功能的多功能工具。",
-        formatter_class=argparse.RawTextHelpFormatter # 保持帮助信息中的换行格式
+        formatter_class=argparse.RawTextHelpFormatter
     )
     
     # 定义主命令 (工作流)

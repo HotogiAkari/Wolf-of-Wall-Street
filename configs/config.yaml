@@ -88,10 +88,10 @@ strategy_config:
       params: {"length": 10}
     - name: "ema"
       params: {"length": 30}
-  #    - name: "ema"
-  #    params: { "length": 50 }
-  #    - name: "ema"
-  #    params: { "length": 200 }
+    - name: "ema"
+      params: { "length": 50 }
+    - name: "ema"
+      params: { "length": 200 }
     - name: "sma"                     # 简单移动平均线 (趋势基础线)
       params: {"length": 20}
     - name: "dema"                    # 双指数移动平均线 (更快响应价格变化)
