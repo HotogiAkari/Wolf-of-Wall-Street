@@ -9,6 +9,7 @@ import torch.nn as nn
 from tqdm.autonotebook import tqdm
 from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
+from model.builders.base_builder import BaseBuilder
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from utils.encoding_utils import encode_categorical_features
@@ -61,12 +62,12 @@ class TabTransformerModel(nn.Module):
         x_combined = torch.cat([x_transformer_out, x_cont], dim=1)
         return self.mlp(x_combined)
 
-class TabTransformerBuilder:
+class TabTransformerBuilder(BaseBuilder):
     """
     TabTransformer 模型的完整构建器。
     """
     def __init__(self, config: Dict[str, Any]):
-        self.config = config
+        super().__init__(config)
         global_cfg = config.get('global_settings', {})
         
         default_params = config.get('default_model_params', {}).get('tabtransformer_params', {})
@@ -101,7 +102,7 @@ class TabTransformerBuilder:
             return X_cont_tensor, X_cat_tensor, y_tensor
         return X_cont_tensor, X_cat_tensor
 
-    def train_and_evaluate_fold(self, train_df: pd.DataFrame = None, val_df: pd.DataFrame = None, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame, Dict]:
+    def train_and_evaluate_fold(self, cached_data: dict, **kwargs) -> Dict[str, Any]:
         if not cached_data:
             raise ValueError("'cached_data' is required for this method.")
 
@@ -168,7 +169,24 @@ class TabTransformerBuilder:
             if patience_counter >= patience:
                 if self.verbose: tqdm.write(f"    - INFO: 早停机制已在第 {epoch + 1} 轮触发。")
                 break
-        
+
+        p = self.model_params
+        model_artifacts = {
+            'model_state_dict': best_model_state,
+            'metadata': {
+                'cat_dims': cat_dims,
+                'feature_cols': cached_data.get('feature_cols'),
+                'model_structure': {
+                    'num_continuous': X_train_cont.shape[1],
+                    'dim': p.get('dim', 32),
+                    'depth': p.get('depth', 4),
+                    'heads': p.get('heads', 4),
+                    'attn_dropout': p.get('dropout', 0.1),
+                    'ff_dropout': p.get('dropout', 0.1)
+                }
+            }
+        }
+
         # --- 4. 处理并返回结果 ---
         ic_df, oof_df, fold_stats = pd.DataFrame(), pd.DataFrame(), {}
         if best_model_state:
@@ -194,11 +212,16 @@ class TabTransformerBuilder:
         gc.collect()
         if self.device == 'cuda': torch.cuda.empty_cache()
             
-        return {'model_state_dict': best_model_state, 'metadata': metadata}, ic_df, oof_df, fold_stats
+        return {
+            'artifacts': model_artifacts,
+            'ic_series': ic_df,
+            'oof_preds': oof_df,
+            'fold_stats': fold_stats
+        }
 
-    def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
+    def train_final_model(self, full_df: pd.DataFrame, **kwargs) -> Dict[str, Any]:
         """
-        (已修复) 在全部数据上训练最终的生产模型。
+        在全部数据上训练最终的生产模型。
         """
         print(f"    - INFO: Starting final TabTransformer model training...")
 
@@ -256,17 +279,13 @@ class TabTransformerBuilder:
                 optimizer.step()
         
         print("    - SUCCESS: Final TabTransformer model training complete.")
-        
+
+        p = self.model_params
         metadata = {
-            # 数据描述 (用于调试和校验)
             'feature_cols': features,
             'cat_features': cat_features,
             'cont_features': cont_features,
-            
-            # 关键的重建参数
             'cat_dims': cat_dims, 
-            
-            # 将所有模型结构参数打包到一个独立的字典中
             'model_structure': {
                 'num_continuous': len(cont_features),
                 'dim': p.get('dim', 32),
@@ -277,4 +296,10 @@ class TabTransformerBuilder:
             }
         }
 
-        return {'model': model, 'scaler': final_scaler, 'metadata': metadata, 'encoders': encoders}
+        # (核心修改) 将返回值包装成标准化的字典
+        return {
+            'model': model,
+            'scaler': final_scaler,
+            'metadata': metadata,
+            'encoders': encoders
+        }

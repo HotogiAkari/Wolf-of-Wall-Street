@@ -13,6 +13,7 @@ import torch.nn as nn
 from tqdm.autonotebook import tqdm
 from typing import Any, Dict, Tuple
 from sklearn.preprocessing import StandardScaler
+from model.builders.base_builder import BaseBuilder
 from torch.optim.lr_scheduler import LinearLR, ReduceLROnPlateau
 
 class LSTMModel(nn.Module):
@@ -32,10 +33,11 @@ class LSTMModel(nn.Module):
         out = self.fc(out)
         return out
 
-class LSTMBuilder:
+class LSTMBuilder(BaseBuilder):
     """LSTM 模型的构建器，适配全局预处理流程。"""
     def __init__(self, config: Dict[str, Any]):
-        self.config = config
+        super().__init__(config)
+
         global_cfg = config.get('global_settings', {})
         
         default_params = config.get('default_model_params', {}).get('lstm_params', {})
@@ -77,7 +79,7 @@ class LSTMBuilder:
             
         return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32), np.array(dates)
 
-    def train_and_evaluate_fold(self, train_df: pd.DataFrame = None, val_df: pd.DataFrame = None, cached_data: dict = None) -> Tuple[Dict, pd.DataFrame, pd.DataFrame, Dict]:
+    def train_and_evaluate_fold(self, cached_data: dict, **kwargs) -> Dict[str, Any]:
         if not cached_data:
             raise ValueError("'cached_data' is required for this method.")
 
@@ -165,7 +167,7 @@ class LSTMBuilder:
                 if not torch.isfinite(val_loss):
                     print(f"FATAL: Epoch {epoch}, 验证损失变为 {val_loss.item()}！")
             
-            # --- (核心修改) 手动管理学习率调度 ---
+            # --- 手动管理学习率调度 ---
             if epoch < warmup_steps:
                 warmup_scheduler.step()
             else:
@@ -193,8 +195,19 @@ class LSTMBuilder:
         if best_val_loss != float('inf'):
             fold_stats['best_loss'] = f"{best_val_loss:.6f}"
         
-        metadata = {'input_size': X_train_tensor.shape[2], 'feature_cols': cached_data.get('feature_cols')}
-        
+        model_artifacts = {
+            'model_state_dict': best_model_state,
+            'metadata': {
+                'input_size': X_train_tensor.shape[2],
+                'feature_cols': cached_data.get('feature_cols'),
+                'model_structure': {
+                    'hidden_size_1': p.get('units_1', 64),
+                    'hidden_size_2': p.get('units_2', 32),
+                    'dropout': p.get('dropout', 0.2)
+                }
+            }
+        }
+
         if X_val_tensor.shape[0] > 0 and best_model_state:
             model.load_state_dict(best_model_state)
             model.eval()
@@ -215,9 +228,14 @@ class LSTMBuilder:
         gc.collect()
         if self.device == 'cuda': torch.cuda.empty_cache()
             
-        return {'model_state_dict': best_model_state, 'metadata': metadata}, ic_df, oof_df, fold_stats
+        return {
+            'artifacts': model_artifacts,
+            'ic_series': ic_df,
+            'oof_preds': oof_df,
+            'fold_stats': fold_stats
+        }
     
-    def train_final_model(self, full_df: pd.DataFrame) -> Dict[str, Any]:
+    def train_final_model(self, full_df: pd.DataFrame, **kwargs) -> Dict[str, Any]:
         """
         在全部数据上训练最终的生产模型。
         """
@@ -273,7 +291,7 @@ class LSTMBuilder:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
-                metadata = {
+        metadata = {
             'input_size': X_full.shape[2],
             'feature_cols': features,
             'model_structure': {
@@ -283,4 +301,8 @@ class LSTMBuilder:
             }
         }
 
-        return {'model': model, 'scaler': final_scaler, 'metadata': metadata}
+        return {
+            'model': model,
+            'scaler': final_scaler,
+            'metadata': metadata
+        }
