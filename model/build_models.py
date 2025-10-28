@@ -1,4 +1,5 @@
 # 文件路径: model/build_models.py
+
 '''
 模型整合与训练
 '''
@@ -51,8 +52,9 @@ def run_training_for_ticker(
     model_suffix = file_suffixes.get(model_type, '.pkl')
     
     # 预先计算出当前配置对应的最终模型版本和路径
-    end_date_str = config.get('strategy_config', {}).get('end_date', 'unknown_date')
+    end_date_str = config.get('data', {}).get('end_date', 'unknown_date')
     version_date = pd.to_datetime(end_date_str).strftime('%Y%m%d')
+    
     final_model_path = model_dir / f"{model_type}_model_{version_date}{model_suffix}"
 
     ic_history_path = model_dir / f"{model_type}_ic_history.csv"

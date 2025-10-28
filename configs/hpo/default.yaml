@@ -1,4 +1,6 @@
-# @package _group_
+# configs/hpo/default.yaml
+# HPO配置参数
+# @package hpo
 
 # 全局 HPO 设置 (作为回退的默认值)
 n_trials: 20                  # 全局默认的试验次数.

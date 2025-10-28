@@ -41,8 +41,8 @@ class LSTMBuilder(BaseBuilder):
 
         global_cfg = config.get('global_settings', {})
         
-        default_params = config.get('default_model_params', {}).get('lstm_params', {})
-        hpo_params = config.get('hpo_config', {}).get('lstm_hpo_config', {}).get('params', {})
+        default_params = config.get('model', {}).get('lstm_params', {})
+        hpo_params = config.get('hpo', {}).get('lstm_hpo_config', {}).get('params', {})
         self.lstm_params = {**default_params, **hpo_params}
         
         self.sequence_length = self.lstm_params.get('sequence_length', 60)

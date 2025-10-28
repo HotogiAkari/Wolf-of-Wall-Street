@@ -1,6 +1,8 @@
 # 文件路径: data_process/get_data.py
 import re
+import json
 import time
+import joblib
 import numpy as np
 import pandas as pd
 import tushare as ts
@@ -612,3 +614,75 @@ def process_all_from_config(config: dict, tickers_to_generate: list = None) -> D
     
     print("--- 批量特征生成流程完成 ---")
     return results_df
+
+def get_latest_global_data(config: dict) -> Dict[str, Optional[pd.DataFrame]]:
+    """
+    为单点预测动态计算并获取所有最新的全局市场数据。
+    封装了对所有内部 _get... 函数的调用，并实现了智能缓存。
+    """
+    print("--- 正在准备所有最新的全局市场数据 (用于单点预测) ---")
+    
+    cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
+    global_cache_file = cache_dir / "_global_data_cache.pkl"
+    global_meta_file = cache_dir / "_global_data_cache_meta.json"
+    today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+
+    # 1. 检查缓存
+    if global_meta_file.exists() and global_cache_file.exists():
+        with open(global_meta_file, 'r') as f:
+            meta = json.load(f)
+        if meta.get('generation_date') == today_str:
+            print("  - SUCCESS: 发现今天的全局数据缓存。正在从缓存加载...")
+            try:
+                cached_data = joblib.load(global_cache_file)
+                # (新增) 返回前进行一次简单的健全性检查
+                if isinstance(cached_data, dict):
+                    return cached_data
+                else:
+                    print("  - WARNNING: 缓存文件格式不正确，将重新生成。")
+            except Exception as e:
+                print(f"  - WARNNING: 加载全局缓存失败: {e}，将重新生成。")
+
+    # 2. 如果缓存不可用，则重新生成
+    print("  - INFO: 缓存不存在或已过期。将重新生成全局数据...")
+    max_lookback_days = 365 * 2
+    end_date_dt = pd.Timestamp.now()
+    start_date_dt = end_date_dt - pd.DateOffset(days=max_lookback_days)
+    start_date_str_global, end_date_str_global = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
+    
+    features_cfg = config.get('features', {})
+
+    # 调用本模块内的“私有”函数
+    market_breadth_df = _generate_market_breadth_data(start_date_str_global, end_date_str_global, cache_dir, config=config)
+    
+    all_external_dfs = []
+    external_tickers = features_cfg.get('external_market_tickers', [])
+    if external_tickers:
+        for ext_ticker in external_tickers:
+            df_ext = _get_us_stock_data_yf(ext_ticker, start_date_str_global, end_date_str_global, cache_dir)
+            if df_ext is not None and not df_ext.empty:
+                all_external_dfs.append(df_ext.rename(columns=lambda c: f"{c}_{ext_ticker}"))
+    external_market_df = pd.concat(all_external_dfs, axis=1) if all_external_dfs else None
+    
+    market_sentiment_df = _get_market_sentiment_data_ak(start_date_str_global, end_date_str_global, cache_dir)
+    macro_df = _get_macroeconomic_data_cn(start_date_str_global, end_date_str_global, config)
+    factors_df = _get_fama_french_factors(start_date_str_global, end_date_str_global)
+
+    # 3. 准备返回结果并保存缓存
+    global_data = {
+        'market_breadth_df': market_breadth_df,
+        'external_market_df': external_market_df,
+        'market_sentiment_df': market_sentiment_df,
+        'macro_df': macro_df,
+        'factors_df': factors_df,
+    }
+
+    try:
+        joblib.dump(global_data, global_cache_file)
+        with open(global_meta_file, 'w') as f:
+            json.dump({'generation_date': today_str}, f)
+        print("  - SUCCESS: 新的全局数据缓存已生成并保存。")
+    except Exception as e:
+        print(f"  - WARNNING: 保存全局数据缓存失败: {e}")
+
+    return global_data

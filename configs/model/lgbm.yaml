@@ -1,17 +1,19 @@
-# @package _group_
+# configs/model/lgbm.yaml
+# LGBM配置参数
+# @package model
 
-  lgbm_params:
-    device: 'gpu'
-    n_jobs: 8                   # 限制 CPU 核心数为 8
-    verbose: -1                 # 控制 C++ 内核日志
-    verbose_period: 10000      # 表示主训练时，每 n 轮打印一次验证集损失
-    n_estimators: 50000           # 树的最大数量. 通常设置一个很大的值，由早停法来决定最佳数量. 
-    feature_fraction: 0.8005786090055831       # 每次迭代时，随机选择 80% 的特征来建树. 用于防止过拟合. 
-    learning_rate: 0.030297480627572117        # 学习率或步长. 较小的值需要更多的树，但通常能达到更好的效果. 
-    min_child_samples: 49       # 一个叶子节点上所需的最少样本数. 用于防止过拟合. 
-    num_leaves: 18              # 一棵树上的最大叶子节点数. 是控制模型复杂度的关键参数. 
-    reg_alpha: 1.136126759483552              # L1 正则化. 
-    reg_lambda: 2.027927483904424            # L2 正则化. 
-    bagging_fraction: 0.8       # 每次迭代时，随机选择 80% 的数据来建树（行采样）. 用于防止过拟合. 
-    bagging_freq: 1             # 每 1 次迭代执行一次 bagging. 
-    early_stopping_rounds: 5000 # 早停法. 如果在验证集上的表现连续 N 轮没有提升，则停止训练. 
+lgbm_params:
+  device: 'gpu'
+  n_jobs: 8                   # 限制 CPU 核心数为 8
+  verbose: -1                 # 控制 C++ 内核日志
+  verbose_period: 10000      # 表示主训练时，每 n 轮打印一次验证集损失
+  n_estimators: 50000           # 树的最大数量. 通常设置一个很大的值，由早停法来决定最佳数量. 
+  feature_fraction: 0.8005786090055831       # 每次迭代时，随机选择 80% 的特征来建树. 用于防止过拟合. 
+  learning_rate: 0.030297480627572117        # 学习率或步长. 较小的值需要更多的树，但通常能达到更好的效果. 
+  min_child_samples: 49       # 一个叶子节点上所需的最少样本数. 用于防止过拟合. 
+  num_leaves: 18              # 一棵树上的最大叶子节点数. 是控制模型复杂度的关键参数. 
+  reg_alpha: 1.136126759483552              # L1 正则化. 
+  reg_lambda: 2.027927483904424            # L2 正则化. 
+  bagging_fraction: 0.8       # 每次迭代时，随机选择 80% 的数据来建树（行采样）. 用于防止过拟合. 
+  bagging_freq: 1             # 每 1 次迭代执行一次 bagging. 
+  early_stopping_rounds: 5000 # 早停法. 如果在验证集上的表现连续 N 轮没有提升，则停止训练. 

@@ -1,6 +1,6 @@
-# 统一配置文件 
+# configs/config.yaml
 
-# --- 1. 默认实验组合 ---
+# --- 默认实验组合 ---
 defaults:
   - data: default
   - features: default
@@ -11,7 +11,7 @@ defaults:
   - application: default
   - _self_
 
-# --- 1. 全局设定 ---
+# --- 全局设定 ---
 # 这部分参数定义了项目的基本环境和全局行为. 
 global_settings:
   seed: 64                            # 全局随机种子. 用于保证所有涉及随机性的操作（如模型训练, 数据采样）的结果都可以被复现. 

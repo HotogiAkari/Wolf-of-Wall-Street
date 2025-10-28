@@ -43,7 +43,7 @@ class RiskManager:
             raise
 
     def _initialize_db(self):
-        """创建 orders 表（如果它不存在）。"""
+        """创建 orders 表"""
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,
@@ -98,12 +98,12 @@ class RiskManager:
 
     def approve_trade(self, ticker: str, direction: str, price: float, latest_market_data: pd.DataFrame, config: dict = None) -> tuple[bool, str | None]:
         """对一个交易信号进行完整的风险审批。"""
-        cfg = config.get('strategy_params', {}) if config else {}
+        risk_cfg = config.get('backtest', {}) if config else {}
 
-        if not self._check_price_deviation(price, latest_market_data, cfg.get('price_deviation_zscore', 3.0)):
+        if not self._check_price_deviation(price, latest_market_data, risk_cfg.get('price_deviation_zscore', 3.0)):
             return False, None
 
-        if not self._check_duplicate_signal(ticker, direction, cfg.get('duplicate_signal_window_min', 5)):
+        if not self._check_duplicate_signal(ticker, direction, risk_cfg.get('duplicate_signal_window_min', 5)):
             return False, None
             
         order_id = str(uuid.uuid4())

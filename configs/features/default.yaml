@@ -1,118 +1,113 @@
+# configs/features/default.yaml
 # 默认的特征工程方案
-# @package _group_
+# @package features
 
-  # Walk-Forward (滚动窗口) 验证策略
-  train_window: 250             # 初始/滚动训练窗口的大小（交易日）. 
-  val_window: 45                # 验证窗口的大小，也作为每次滚动的步长（交易日）(训练模型的预测天数). 
-  
-  # 特征计算器执行顺序
-  calculator_phases:
-    - 'base'
-    - 'contextual'
-    - 'composite'
-  
-  # 特征工程参数
-  correlation_window: 120       # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小. 
-  correlation_threshold: 0.95   # 初步特征筛选的阈值. 如果两个特征的相关性绝对值高于此值，则会移除其中一个，以减少共线性. 
-  ffill_limit: 10               # 前向填充缺失值的最大连续天数. 用于处理节假日等造成的少量数据空洞. 
-  calculator_phases:            # 特征计算器的执行阶段顺序
+# Walk-Forward (滚动窗口) 验证策略
+train_window: 250             # 初始/滚动训练窗口的大小（交易日）. 
+val_window: 45                # 验证窗口的大小，也作为每次滚动的步长（交易日）(训练模型的预测天数). 
+
+# 特征计算器执行顺序
+calculator_phases:
   - 'base'
   - 'contextual'
   - 'composite'
 
-  # 外部市场对标, 可以是美股ETF, 黄金ETF, 债券ETF等, 代码需符合 yfinance 标准. 用于 IntermarketCorrelationCalculator
-  external_market_tickers:
-    - "SPY"       # 标普500 ETF, 代表美股大盘
-    - "QQQ"     # 纳斯达克100 ETF, 代表科技股
-    - "GLD"     # 黄金ETF, 代表避险情绪
-    - "TLT"     # 美国20+年国债ETF, 代表利率和风险偏好
-  
-  # --- 详细的特征列表 ---
+# 特征工程参数
+correlation_window: 120       # 计算滚动相关性特征（如与基准指数的相关性）时使用的窗口大小. 
+correlation_threshold: 0.95   # 初步特征筛选的阈值. 如果两个特征的相关性绝对值高于此值，则会移除其中一个，以减少共线性. 
+ffill_limit: 10               # 前向填充缺失值的最大连续天数. 用于处理节假日等造成的少量数据空洞. 
+# 外部市场对标, 可以是美股ETF, 黄金ETF, 债券ETF等, 代码需符合 yfinance 标准. 用于 IntermarketCorrelationCalculator
+external_market_tickers:
+  - "SPY"       # 标普500 ETF, 代表美股大盘
+  - "QQQ"     # 纳斯达克100 ETF, 代表科技股
+  - "GLD"     # 黄金ETF, 代表避险情绪
+  - "TLT"     # 美国20+年国债ETF, 代表利率和风险偏好
 
-  # 为统计特征计算器提供窗口尺寸
-  # 用于 StatisticalFeatureCalculator
-  stat_windows: [5, 10, 20, 30, 45, 60]     # [整数列表] 定义计算滑动统计特征时使用的多个窗口尺寸（单位：交易日）. 计算过去 x 日的收益率
-  # 用于 TrendRegimeFeatureCalculator
-  trend_window: 45                  # [整数] 定义计算价格趋势斜率时使用的线性回归窗口大小（单位：交易日）. 值越大，捕捉的趋势越长；值越小，对短期趋势变化越敏感. 
-  # 用于 MomentumVolatilityCalculator
-  momentum_windows: [3, 6, 12]      # [整数列表] 定义计算动量/波动率类因子时使用的窗口期（单位：月）
-  # 配置K线形态 用于 CandlestickPatternCalculator
-  candlestick_patterns:
-    - "doji"                # 十字星：犹豫信号，可能反转
-    - "hammer"              # 锤子线：底部反转信号
-    - "engulfing"           # 吞没形态：趋势切换信号
-    - "shootingstar"        # 流星线：顶部反转信号
-    - "morningstar"         # 晨星形态：底部反转信号
-    - "eveningstar"         # 黄昏星形态：顶部反转信号
-    # 强力趋势与动量形态
-    - "3whitesoldiers"      # 三白兵：强烈的看涨反转/持续信号
-    - "3blackcrows"         # 三只乌鸦：强烈的看跌反转/持续信号
-    - "marubozu"            # 光头光脚：单方向的极致动量信号
-    # 趋势持续形态
-    # - "rising3methods"      # 上升三法：强看涨持续信号
-    # - "falling3methods"     # 下降三法：强看跌持续信号
-    # 经典反转形态
-    - "harami"              # 孕线形态：趋势动力减弱信号
-    - "piercing"            # 刺透形态：底部反转信号
-    - "darkcloudcover"      # 乌云盖顶：顶部反转信号
-  # 配置技术指标 (用于 TechnicalIndicatorCalculator), 这是计算金叉/死叉的基础
-  technical_indicators:
-    # === 趋势类指标 ===
-    - name: "ema"                     # 指数移动平均线
-      params: {"length": 10}
-    - name: "ema"
-      params: {"length": 30}
-    - name: "ema"
-      params: { "length": 50 }
-    - name: "ema"
-      params: { "length": 200 }
-    - name: "sma"                     # 简单移动平均线 (趋势基础线)
-      params: {"length": 20}
-    - name: "dema"                    # 双指数移动平均线 (更快响应价格变化)
-      params: {"length": 20}
-    - name: "tema"                    # 三重指数移动平均线 (进一步减少滞后)
-      params: {"length": 20}
-    - name: "adx"                     # 平均趋向指标 (反映趋势强度)
-      params: {"length": 14}
-    # === 动量类指标 ===
-    - name: "rsi"                     # 相对强弱指标 (超买/超卖判断)
-      params: {"length": 14}
-    - name: "stoch"                   # 随机震荡指标 (短期反转信号)
-      params: {"k": 14, "d": 3, "smooth_k": 3}
-    - name: "macd"                    # 移动平均收敛发散指标 (趋势反转)
-      params: {"fast": 12, "slow": 26, "signal": 9}
-    - name: "ppo"                     # 百分比价格振荡器 (MACD 的百分比版本)
-      params: {"fast": 12, "slow": 26}
-    - name: "roc"                     # 价格变化率 (短期涨跌速率)
-      params: {"length": 10}
-    - name: "mom"                     # 动量指标 (衡量价格上升或下降的速度)
-      params: {"length": 10}
-    # === 波动性类指标 ===
-    - name: "bbands"                  # 布林带 (价格波动区间与突破信号)
-      params: {"length": 20, "std": 2}
-    - name: "atr"                     # 平均真实波幅 (衡量市场波动程度)
-      params: {"length": 14}
-    - name: "natr"                    # 归一化平均真实波幅 (波动率标准化)
-      params: {"length": 14}
-    - name: "donchian"                # 唐奇安通道 (高低突破检测)
-      params: {"lower_length": 20, "upper_length": 20}
-    # === 成交量类指标 ===
-    - name: "obv"                     # 能量潮指标 (量价配合确认趋势)
-      params: {}
-    - name: "mfi"                     # 资金流量指标 (带成交量的 RSI)
-      params: {"length": 14}
-    - name: "vwap"                    # 成交量加权平均价 (机构参考价)
-      params: {}
-    # === 市场结构类指标 ===
-    - name: "psar"                    # 抛物线转向指标 (判断趋势反转点)
-      params: {"acceleration": 0.02, "maximum": 0.2}
-    - name: "ichimoku"                # 一目均衡表 (未来支撑阻力与趋势云)
-      params: {"tenkan": 9, "kijun": 26, "senkou": 52}
-  # 配置交叉信号 (用于 CrossoverSignalCalculator)
-  crossover_signals:
-    - name: "ema_50_200"
-      fast: "ema_50"
-      slow: "ema_200"
-    - name: "macd_signal"
-      fast: "macd_12_26_9"
-      slow: "macds_12_26_9"
+# --- 详细的特征列表 ---
+# 为统计特征计算器提供窗口尺寸
+# 用于 StatisticalFeatureCalculator
+stat_windows: [5, 10, 20, 30, 45, 60]     # [整数列表] 定义计算滑动统计特征时使用的多个窗口尺寸（单位：交易日）. 计算过去 x 日的收益率
+# 用于 TrendRegimeFeatureCalculator
+trend_window: 45                  # [整数] 定义计算价格趋势斜率时使用的线性回归窗口大小（单位：交易日）. 值越大，捕捉的趋势越长；值越小，对短期趋势变化越敏感. 
+# 用于 MomentumVolatilityCalculator
+momentum_windows: [3, 6, 12]      # [整数列表] 定义计算动量/波动率类因子时使用的窗口期（单位：月）
+# 配置K线形态 用于 CandlestickPatternCalculator
+candlestick_patterns:
+  - "doji"                # 十字星：犹豫信号，可能反转
+  - "hammer"              # 锤子线：底部反转信号
+  - "engulfing"           # 吞没形态：趋势切换信号
+  - "shootingstar"        # 流星线：顶部反转信号
+  - "morningstar"         # 晨星形态：底部反转信号
+  - "eveningstar"         # 黄昏星形态：顶部反转信号
+  # 强力趋势与动量形态
+  - "3whitesoldiers"      # 三白兵：强烈的看涨反转/持续信号
+  - "3blackcrows"         # 三只乌鸦：强烈的看跌反转/持续信号
+  - "marubozu"            # 光头光脚：单方向的极致动量信号
+  # 趋势持续形态
+  # - "rising3methods"      # 上升三法：强看涨持续信号
+  # - "falling3methods"     # 下降三法：强看跌持续信号
+  # 经典反转形态
+  - "harami"              # 孕线形态：趋势动力减弱信号
+  - "piercing"            # 刺透形态：底部反转信号
+  - "darkcloudcover"      # 乌云盖顶：顶部反转信号
+# 配置技术指标 (用于 TechnicalIndicatorCalculator), 这是计算金叉/死叉的基础
+technical_indicators:
+  # === 趋势类指标 ===
+  - name: "ema"                     # 指数移动平均线
+    params: {"length": 10}
+  - name: "ema"
+    params: {"length": 30}
+  - name: "ema"
+    params: { "length": 50 }
+  - name: "ema"
+    params: { "length": 200 }
+  - name: "sma"                     # 简单移动平均线 (趋势基础线)
+    params: {"length": 20}
+  - name: "dema"                    # 双指数移动平均线 (更快响应价格变化)
+    params: {"length": 20}
+  - name: "tema"                    # 三重指数移动平均线 (进一步减少滞后)
+    params: {"length": 20}
+  - name: "adx"                     # 平均趋向指标 (反映趋势强度)
+    params: {"length": 14}
+  # === 动量类指标 ===
+  - name: "rsi"                     # 相对强弱指标 (超买/超卖判断)
+    params: {"length": 14}
+  - name: "stoch"                   # 随机震荡指标 (短期反转信号)
+    params: {"k": 14, "d": 3, "smooth_k": 3}
+  - name: "macd"                    # 移动平均收敛发散指标 (趋势反转)
+    params: {"fast": 12, "slow": 26, "signal": 9}
+  - name: "ppo"                     # 百分比价格振荡器 (MACD 的百分比版本)
+    params: {"fast": 12, "slow": 26}
+  - name: "roc"                     # 价格变化率 (短期涨跌速率)
+    params: {"length": 10}
+  - name: "mom"                     # 动量指标 (衡量价格上升或下降的速度)
+    params: {"length": 10}
+  # === 波动性类指标 ===
+  - name: "bbands"                  # 布林带 (价格波动区间与突破信号)
+    params: {"length": 20, "std": 2}
+  - name: "atr"                     # 平均真实波幅 (衡量市场波动程度)
+    params: {"length": 14}
+  - name: "natr"                    # 归一化平均真实波幅 (波动率标准化)
+    params: {"length": 14}
+  - name: "donchian"                # 唐奇安通道 (高低突破检测)
+    params: {"lower_length": 20, "upper_length": 20}
+  # === 成交量类指标 ===
+  - name: "obv"                     # 能量潮指标 (量价配合确认趋势)
+    params: {}
+  - name: "mfi"                     # 资金流量指标 (带成交量的 RSI)
+    params: {"length": 14}
+  - name: "vwap"                    # 成交量加权平均价 (机构参考价)
+    params: {}
+  # === 市场结构类指标 ===
+  - name: "psar"                    # 抛物线转向指标 (判断趋势反转点)
+    params: {"acceleration": 0.02, "maximum": 0.2}
+  - name: "ichimoku"                # 一目均衡表 (未来支撑阻力与趋势云)
+    params: {"tenkan": 9, "kijun": 26, "senkou": 52}
+# 配置交叉信号 (用于 CrossoverSignalCalculator)
+crossover_signals:
+  - name: "ema_50_200"
+    fast: "ema_50"
+    slow: "ema_200"
+  - name: "macd_signal"
+    fast: "macd_12_26_9"
+    slow: "macds_12_26_9"

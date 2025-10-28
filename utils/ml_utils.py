@@ -7,27 +7,38 @@ from scipy.stats import spearmanr
 def walk_forward_split(df: pd.DataFrame, config: dict) -> list:
     """
     实现滚动窗口时间序列交叉验证的切分逻辑。
+    从 'features' 配置组读取窗口参数。
     """
     if not isinstance(df.index, pd.DatetimeIndex):
         raise TypeError("Input DataFrame must have a DatetimeIndex.")
+        
     df = df.sort_index()
-    train_window = config.get("train_window", 500)
-    val_window = config.get("val_window", 60)
+    
+    features_config = config.get('features', {})
+    train_window = features_config.get("train_window", 500)
+    val_window = features_config.get("val_window", 60)
+    
     dates = df.index.unique()
+    
     if len(dates) < train_window + val_window:
-        print(f"WARNNING: 数据长度 ({len(dates)}) 对于前向传播来说太短了.")
+        print(f"WARNNING: 数据长度 ({len(dates)}) 对于前向传播来说太短了 (需要至少 {train_window + val_window} 天)。")
         return []
     
     folds = []
     start_index = train_window
+    
     while start_index + val_window <= len(dates):
         train_end_date = dates[start_index - 1]
         val_end_date = dates[start_index + val_window - 1]
+        
         train_df = df.loc[:train_end_date]
         val_df = df.loc[train_end_date:val_end_date].iloc[1:]
+        
         if not val_df.empty:
             folds.append((train_df, val_df))
+            
         start_index += val_window
+        
     return folds
 
 def spearman_corr_scorer(y_true, y_pred):

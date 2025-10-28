@@ -1,0 +1,1 @@
+run_training_for_ticker

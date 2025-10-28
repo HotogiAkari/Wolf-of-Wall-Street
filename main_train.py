@@ -160,91 +160,37 @@ def _prophet_load_artifacts(config: dict, modules: dict, target_ticker: str, use
 def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str, keyword: str) -> pd.DataFrame:
     """
     为单点预测动态计算并获取最新的特征 DataFrame。
-    内置了智能的每日全局数据缓存，避免不必要的重复下载。
     """
     print("\n--- 步骤2：准备预测所需的数据 ---")
     
-    pd, Path, json = modules['pd'], modules['Path'], modules['json']
-    initialize_apis, shutdown_apis, get_full_feature_df = modules['initialize_apis'], modules['shutdown_apis'], modules['get_full_feature_df']
-    
-    try:
-        from data_process.get_data import (
-            _get_macroeconomic_data_cn, _get_market_sentiment_data_ak, 
-            _generate_market_breadth_data, _get_fama_french_factors
-        )
-    except ImportError:
-        print("WARNNING: 无法直接从 data_process.get_data 导入内部函数。")
-        return None
+    # (核心修改 1) 只获取需要的公共接口
+    initialize_apis = modules['initialize_apis']
+    shutdown_apis = modules['shutdown_apis']
+    get_full_feature_df = modules['get_full_feature_df']
+    get_latest_global_data = modules['get_latest_global_data']
 
     full_feature_df = None
     try:
         initialize_apis(config)
         
-        # --- 1. 智能全局数据缓存 ---
-        print("  - INFO: 检查全局数据缓存是否为最新...")
-        cache_dir = Path(config.get('global_settings', {}).get("data_cache_dir", "data_cache"))
-        global_cache_file = cache_dir / "_global_data_cache.pkl"
-        global_meta_file = cache_dir / "_global_data_cache_meta.json"
-        today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
-        
-        market_breadth_df, external_market_df, market_sentiment_df, macro_df, factors_df = None, None, None, None, None
-        
-        # a. 检查缓存
-        use_cache = False
-        if global_meta_file.exists() and global_cache_file.exists():
-            with open(global_meta_file, 'r') as f:
-                meta = json.load(f)
-            if meta.get('generation_date') == today_str:
-                print("    - SUCCESS: 发现今天的全局数据缓存。正在从缓存加载...")
-                cached_global_data = joblib.load(global_cache_file)
-                market_breadth_df = cached_global_data.get('market_breadth_df')
-                external_market_df = cached_global_data.get('external_market_df')
-                market_sentiment_df = cached_global_data.get('market_sentiment_df')
-                macro_df = cached_global_data.get('macro_df')
-                factors_df = cached_global_data.get('factors_df')
-                use_cache = True
+        # (核心修改 2) 用一行调用替换所有全局数据获取逻辑
+        global_data = get_latest_global_data(config)
 
-        # b. 如果缓存不可用，则执行下载
-        if not use_cache:
-            print("    - INFO: 缓存不存在或已过期。将重新生成全局数据...")
-            max_lookback_days = 365 * 2
-            end_date_dt = pd.Timestamp.now()
-            start_date_dt = end_date_dt - pd.DateOffset(days=max_lookback_days)
-            start_date_str_global, end_date_str_global = start_date_dt.strftime('%Y-%m-%d'), end_date_dt.strftime('%Y-%m-%d')
-            
-            strategy_config = config.get('strategy_config', {})
-            
-            market_breadth_df = _generate_market_breadth_data(start_date_str_global, end_date_str_global, cache_dir, config=config)
-            
-            all_external_dfs = []
-            external_market_df = pd.concat(all_external_dfs, axis=1) if all_external_dfs else None
-            
-            market_sentiment_df = _get_market_sentiment_data_ak(start_date_str_global, end_date_str_global, cache_dir)
-            macro_df = _get_macroeconomic_data_cn(start_date_str_global, end_date_str_global, config)
-            factors_df = _get_fama_french_factors(start_date_str_global, end_date_str_global)
-
-            # c. 保存新的全局数据缓存
-            global_data_to_cache = {
-                'market_breadth_df': market_breadth_df, 'external_market_df': external_market_df,
-                'market_sentiment_df': market_sentiment_df, 'macro_df': macro_df, 'factors_df': factors_df
-            }
-            joblib.dump(global_data_to_cache, global_cache_file)
-            with open(global_meta_file, 'w') as f:
-                json.dump({'generation_date': today_str}, f)
-            print("    - SUCCESS: 新的全局数据缓存已生成并保存。")
-        
-        # --- 2. 为目标股票获取特征 (使用已加载或新生成的全局数据) ---
+        # --- 为目标股票获取特征 ---
         max_lookback_days_stock = 365 * 2
         end_date_dt_stock = pd.Timestamp.now()
         start_date_dt_stock = end_date_dt_stock - pd.DateOffset(days=max_lookback_days_stock)
         start_date_str_stock, end_date_str_stock = start_date_dt_stock.strftime('%Y-%m-%d'), end_date_dt_stock.strftime('%Y-%m-%d')
 
+        # 将获取到的全局数据通过 kwargs 传递给 get_full_feature_df
         full_feature_df = get_full_feature_df(
-            ticker=target_ticker, config=config, 
-            start_date_str=start_date_str_stock, end_date_str=end_date_str_stock,
-            keyword=keyword, prediction_mode=True,
-            market_breadth_df=market_breadth_df, external_market_df=external_market_df,
-            market_sentiment_df=market_sentiment_df, macro_df=macro_df, factors_df=factors_df
+            ticker=target_ticker, 
+            config=config, 
+            start_date_str=start_date_str_stock, 
+            end_date_str=end_date_str_stock,
+            keyword=keyword, 
+            prediction_mode=True,
+            **global_data # <-- 使用字典解包传递所有全局 DataFrame
         )
     finally:
         shutdown_apis()
@@ -275,7 +221,8 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     
     feature_df_aligned = full_feature_df[train_feature_cols]
     
-    lstm_seq_len = config.get('default_model_params',{}).get('lstm_params',{}).get('sequence_length', 60)
+    lstm_params = config.get('model', {}).get('lstm_params', {})
+    lstm_seq_len = lstm_params.get('sequence_length', 60)
     if len(feature_df_aligned) < lstm_seq_len:
         raise ValueError(f"对齐后的数据长度 ({len(feature_df_aligned)}) 不足以满足 LSTM 序列长度 ({lstm_seq_len})。")
     
@@ -400,7 +347,9 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     # --- 6. 风险审批与决策 ---
     print("\n--- 步骤6：风险审批与决策输出 ---")
     risk_manager = artifacts['risk_manager']
-    signal_threshold = config.get('backtest', {}).get('live_trading_signal_threshold', 0.01)
+    backtest_cfg = config.get('backtest', {})
+    signal_threshold = backtest_cfg.get('live_trading_signal_threshold', 0.01)
+    
     direction_str = 'BUY' if fused_prediction > signal_threshold else ('SELL' if fused_prediction < -signal_threshold else 'HOLD')
     trade_price = latest_features['close'].iloc[0]
     decision_approved, order_id, decision_notes = False, None, "信号强度未达到开仓阈值。"
@@ -451,7 +400,8 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
         ax1.plot(plot_df.index, plot_df['close'], color='black', linewidth=1.5, zorder=5)
         
         last_price, last_date = plot_df['close'].iloc[-1], plot_df.index[-1]
-        pred_horizon = config.get('strategy_config', {}).get('labeling_horizon', 45)
+        labeling_cfg = config.get('labeling', {})
+        pred_horizon = labeling_cfg.get('labeling_horizon', 45)
         future_date = last_date + pd.DateOffset(days=pred_horizon)
         
         handles = [plt.Line2D([0], [0], color='black', lw=2, label='收盘价')]
@@ -505,12 +455,15 @@ def run_all_data_pipeline(config: dict, modules: dict, use_today_as_end_date=Fal
     pd = modules['pd']
     resolve_data_pipeline_dates = modules['resolve_data_pipeline_dates']
 
+    if 'data' not in config:
+        config['data'] = {}
+
     # --- 2. 使用工具函数来解析日期 ---
     # 如果指定了 use_today_as_end_date，则为工具函数准备一个临时键
     if use_today_as_end_date:
         today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
         # 注入 dynamic_end_date，让 resolve_data_pipeline_dates 优先使用它
-        config['strategy_config']['dynamic_end_date'] = today_str
+        config['data']['dynamic_end_date'] = today_str
         print(f"INFO: 已启用动态日期模式，将使用今天的日期 '{today_str}' 作为 end_date。")
     
     try:
@@ -678,23 +631,18 @@ def run_hpo_train(config: dict, modules: dict):
     """
     print("=== 阶段 2.2：超参数优化 ===")
 
-    # --- 1. 提取所需模块和配置 ---
-    pd = modules['pd']
-    Path = modules['Path']
-    yaml = modules['yaml']
-    joblib = modules['joblib']
+    # --- 1. 提取模块和配置 ---
+    Path, joblib, yaml = modules['Path'], modules['joblib'], modules['yaml']
     run_hpo_for_ticker = modules['run_hpo_for_ticker']
 
-    hpo_config = config.get('hpo_config', {})
-    stocks_to_process = config.get('stocks_to_process', [])
+    hpo_config = config.get('hpo', {})
     global_settings = config.get('global_settings', {})
-    strategy_config = config.get('strategy_config', {})
-    default_model_params = config.get('default_model_params', {})
     
     models_for_hpo = hpo_config.get('models_for_hpo', [])
     hpo_tickers = hpo_config.get('tickers_for_hpo', [])
-
-    # --- 2. (核心修改) 获取 L3 缓存目录路径 ---
+    stocks_to_process = config.get('data', {}).get('stocks_to_process', [])
+    
+    # --- 2. 获取 L3 缓存目录路径 ---
     l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/l3_cache')
     L3_CACHE_DIR = Path(l3_cache_dir_path)
     
@@ -767,16 +715,12 @@ def run_hpo_train(config: dict, modules: dict):
             hpo_folds_data = all_preprocessed_folds[-num_eval_folds:]
             
             print(f"\nINFO: 已为 {keyword} ({ticker}) 加载最后 {len(hpo_folds_data)} 个 folds 用于 {model_type_for_hpo.upper()} HPO。")
-
-            hpo_run_config = {
-                'global_settings': global_settings, 'strategy_config': strategy_config,
-                'default_model_params': default_model_params, 'stocks_to_process': [stock_info],
-                'hpo_config': hpo_config
-            }
             
             best_params, best_value = run_hpo_for_ticker(
-                preprocessed_folds=hpo_folds_data, ticker=ticker,
-                config=hpo_run_config, model_type=model_type_for_hpo
+                preprocessed_folds=hpo_folds_data, 
+                ticker=ticker,
+                config=config,
+                model_type=model_type_for_hpo
             )
             
             if best_params and best_value is not None:
@@ -959,7 +903,7 @@ def run_all_models_train(config: dict, modules: dict,
         if run_fusion and base_models_succeeded_count == len(models_to_train):
             print(f"\n--- 2.3.5 为 {keyword} ({ticker}) 训练融合模型 ---")
             try:
-                end_date_str = config.get('strategy_config', {}).get('end_date', 'unknown_date')
+                end_date_str = config.get('data', {}).get('end_date', 'unknown_date')
                 version_date = pd.to_datetime(end_date_str).strftime('%Y%m%d')
 
                 fuser = ModelFuser(ticker, config, version=version_date)
@@ -1062,9 +1006,7 @@ def run_performance_evaluation(config: dict, modules: dict, all_ic_history: list
     evaluation_summary = final_eval_df.groupby(['ticker_name', 'model_type'])['rank_ic'].agg(mean='mean', std=safe_std).reset_index()
     evaluation_summary['icir'] = np.where(evaluation_summary['std'] > 1e-8, evaluation_summary['mean'] / evaluation_summary['std'], evaluation_summary['mean'] * 100)
     
-    print("\n" + "="*80)
     print("=== 1. 模型预测能力评估 (ICIR) ===")
-    print("="*80)
     print(evaluation_summary.to_string())
 
     # --- 2. 向量化回测 ---
@@ -1205,55 +1147,87 @@ def run_single_stock_prediction(config: dict, modules: dict, target_ticker: str 
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     """
-    Hydra 驱动的主执行函数 (命令行入口)。
+    主执行函数。
+    负责配置处理、模块加载和工作流分发。
     """
-    print("--- 启动量化模型核心引擎 (由 Hydra 管理) ---")
+    print("--- 启动量化模型核心引擎 ---")
     
     # --- 1. 配置处理 ---
     config = OmegaConf.to_container(cfg, resolve=True)
     
     # --- 2. 模块动态加载 ---
+    # 将项目根目录添加到系统路径，确保所有模块都能被找到
     project_root = str(Path(__file__).resolve().parent)
     if project_root not in sys.path:
         sys.path.append(project_root)
 
     try:
-        from data_process.get_data import initialize_apis, shutdown_apis, get_full_feature_df
+        # a. 导入核心业务逻辑模块
         from data_process.save_data import run_data_pipeline, get_processed_data_path
         from model.build_models import run_training_for_ticker
-        from model.hpo_utils import run_hpo_for_ticker
+        from utils.hpo_utils import run_hpo_for_ticker
+        from risk_management.risk_manager import RiskManager
+        from backtest.backtester import VectorizedBacktester
+        from backtest.event_driven_backtester import run_backtrader_backtest
+        
+        # b. 导入所有模型构建器及其依赖
+        from model.builders.base_builder import builder_registry
         from model.builders.model_fuser import ModelFuser
         from model.builders.lgbm_builder import LGBMBuilder
         from model.builders.lstm_builder import LSTMBuilder, LSTMModel
         from model.builders.tabtransformer_builder import TabTransformerBuilder, TabTransformerModel
-        from risk_management.risk_manager import RiskManager
-        from backtest.backtester import VectorizedBacktester
-        from backtest.event_driven_backtester import run_backtrader_backtest
+        
+        # c. 导入所有需要暴露给工作流的公共接口
+        from data_process.get_data import (
+            initialize_apis, 
+            shutdown_apis, 
+            get_full_feature_df,
+            get_latest_global_data
+        )
+
+        # d. 导入所有工具函数
         from utils.date_utils import resolve_data_pipeline_dates
         from utils.encoding_utils import encode_categorical_features
         from utils.file_utils import find_latest_artifact_paths
         from utils.ml_utils import walk_forward_split
+        
         print("INFO: 项目模块导入成功。")
     except ImportError as e:
         print(f"FATAL: 模块导入失败: {e}")
+        # 打印更详细的 trace 以便调试
+        import traceback
+        traceback.print_exc()
         return
 
-    # 构建 modules 字典
+    # 构建 modules 字典，作为所有工作流函数的统一依赖入口
     modules = {
+        # 核心业务逻辑
         'initialize_apis': initialize_apis, 'shutdown_apis': shutdown_apis,
         'get_full_feature_df': get_full_feature_df, 'run_data_pipeline': run_data_pipeline,
         'get_processed_data_path': get_processed_data_path, 'run_training_for_ticker': run_training_for_ticker,
-        'run_hpo_for_ticker': run_hpo_for_ticker, 'ModelFuser': ModelFuser,
+        'run_hpo_for_ticker': run_hpo_for_ticker,
+        
+        # 公共接口
+        'get_latest_global_data': get_latest_global_data,
+        
+        # 类与构建器
+        'ModelFuser': ModelFuser,
         'LGBMBuilder': LGBMBuilder, 'LSTMBuilder': LSTMBuilder, 'LSTMModel': LSTMModel,
         'TabTransformerBuilder': TabTransformerBuilder, 'TabTransformerModel': TabTransformerModel,
         'RiskManager': RiskManager, 'VectorizedBacktester': VectorizedBacktester,
-        'run_backtrader_backtest': run_backtrader_backtest, 'pd': pd, 'torch': torch,
-        'joblib': joblib, 'tqdm': tqdm, 'StandardScaler': StandardScaler, 'Path': Path,
-        'yaml': yaml, 'json': json,
+        
+        # 回测与其他
+        'run_backtrader_backtest': run_backtrader_backtest,
+        
+        # 工具函数
         'resolve_data_pipeline_dates': resolve_data_pipeline_dates,
         'encode_categorical_features': encode_categorical_features,
         'find_latest_artifact_paths': find_latest_artifact_paths,
         'walk_forward_split': walk_forward_split,
+        
+        # 常用库的别名
+        'pd': pd, 'torch': torch, 'joblib': joblib, 'tqdm': tqdm, 
+        'StandardScaler': StandardScaler, 'Path': Path, 'yaml': yaml, 'json': json,
     }
 
     # --- 3. 工作流分发 ---
@@ -1275,7 +1249,9 @@ def main(cfg: DictConfig) -> None:
             )
         
         elif workflow == 'predict':
-            ticker_to_predict = cfg.get("ticker", config.get('application', {}).get('application_settings', {}).get('prophet_target_ticker'))
+            app_cfg = config.get('application', {}).get('application_settings', {})
+            ticker_to_predict = cfg.get("ticker", app_cfg.get('prophet_target_ticker'))
+            
             if ticker_to_predict:
                 run_single_stock_prediction(config, modules, target_ticker=ticker_to_predict, use_specific_models=cfg.get('models'))
             else:

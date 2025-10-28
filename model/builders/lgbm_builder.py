@@ -14,10 +14,12 @@ class LGBMBuilder(BaseBuilder):
         super().__init__(config)
         
         global_cfg = config.get('global_settings', {})
-        default_params = config.get('default_model_params', {}).get('lgbm_params', {})
-        hpo_fixed_params = config.get('hpo_config', {}).get('lgbm_hpo_config', {}).get('params', {})
+
+        default_params = config.get('model', {}).get('lgbm_params', {})
+        hpo_fixed_params = config.get('hpo', {}).get('lgbm_hpo_config', {}).get('params', {})
+
         # 这里的 trial_params 是为了 HPO 流程准备的，它会覆盖其他同名参数
-        trial_params = config.get('default_model_params', {}).get('lgbm_params', {})
+        trial_params = config.get('model', {}).get('lgbm_params', {})
         
         final_params = {**default_params, **hpo_fixed_params, **trial_params}
         final_params['random_state'] = global_cfg.get('seed', 42)
@@ -41,7 +43,6 @@ class LGBMBuilder(BaseBuilder):
         if not cached_data:
             raise ValueError("LGBMBuilder requires 'cached_data'.")
 
-        # (核心修改) 统一数据来源
         X_train_scaled = cached_data['X_train_scaled']
         y_train = cached_data['y_train']
         X_val_scaled = cached_data['X_val_scaled']

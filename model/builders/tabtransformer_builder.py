@@ -71,16 +71,14 @@ class TabTransformerBuilder(BaseBuilder):
         super().__init__(config)
         global_cfg = config.get('global_settings', {})
         
-        default_params = config.get('default_model_params', {}).get('tabtransformer_params', {})
-        hpo_params = config.get('hpo_config', {}).get('tabtransformer_hpo_config', {}).get('params', {})
+        default_params = config.get('model', {}).get('tabtransformer_params', {})
+        hpo_params = config.get('hpo', {}).get('tabtransformer_hpo_config', {}).get('params', {})
         self.model_params = {**default_params, **hpo_params}
         
         self.label_col = global_cfg.get('label_column', 'label_return')
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.verbose_period = self.model_params.get('verbose_period', 5)
         self.verbose = self.verbose_period > 0
-        
-        print(f"INFO: PyTorch TabTransformerBuilder initialized with device: {self.device.upper()}")
 
     def _prepare_data_tensors(self, X_df: pd.DataFrame, y_series: pd.Series = None):
         """

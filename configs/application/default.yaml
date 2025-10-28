@@ -1,5 +1,6 @@
+# configs/application/default.yaml
 # 应用与工具配置
-# @package _group_
+# @package application
 
 # 单点预测工具
 application_settings:

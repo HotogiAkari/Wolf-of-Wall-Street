@@ -1,18 +1,20 @@
-# @package _group_
+# configs/model/lstm.yaml
+# LSTM配置参数
+# @package model
 
-  lstm_params:
-    num_workers: 8              # DataLoader 使用的并行加载进程数 (使用核心数), 设为 0 表示只使用主进程加载（速度慢）
-    verbose_period: 10        # 表示主训练时，每 n 轮打印一次验证集损失
-    sequence_length: 120         # 输入 LSTM 模型的时间序列长度（即用过去 N 天的数据来预测未来）. 
-    epochs: 75                  # 最大的训练轮次. 通常由早停法提前终止. 
-    final_model_epochs: 50      # 最终模型训练的固定轮次
-    batch_size: 128             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
-    learning_rate: 0.0001       # 优化器（如 Adam）的学习率. 
-    warmup_steps: 10             # 前 N 轮进行学习率预热
-    plateau_patience: 20     # ReduceLROnPlateau 的耐心轮次
-    plateau_factor: 0.5      # ReduceLROnPlateau 降低学习率的因子 (new_lr = lr * factor)
-    units_1: 32                 # LSTM 第一个隐藏层的神经元数量. 
-    units_2: 64                 # LSTM 第二个隐藏层的神经元数量. 
-    dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合. 
-    early_stopping_rounds_lstm: 50 # LSTM 的早停法耐心轮次. 
-    precision: 16               # 控制 LSTM 的训练精度(float16 或 float32). 从32修改为16需重新运行数据预处理.
+lstm_params:
+  num_workers: 8              # DataLoader 使用的并行加载进程数 (使用核心数), 设为 0 表示只使用主进程加载（速度慢）
+  verbose_period: 10        # 表示主训练时，每 n 轮打印一次验证集损失
+  sequence_length: 120         # 输入 LSTM 模型的时间序列长度（即用过去 N 天的数据来预测未来）. 
+  epochs: 75                  # 最大的训练轮次. 通常由早停法提前终止. 
+  final_model_epochs: 50      # 最终模型训练的固定轮次
+  batch_size: 128             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
+  learning_rate: 0.0001       # 优化器（如 Adam）的学习率. 
+  warmup_steps: 10             # 前 N 轮进行学习率预热
+  plateau_patience: 20     # ReduceLROnPlateau 的耐心轮次
+  plateau_factor: 0.5      # ReduceLROnPlateau 降低学习率的因子 (new_lr = lr * factor)
+  units_1: 32                 # LSTM 第一个隐藏层的神经元数量. 
+  units_2: 64                 # LSTM 第二个隐藏层的神经元数量. 
+  dropout: 0.2                # 在网络层之间随机丢弃 20% 的神经元连接，用于防止过拟合. 
+  early_stopping_rounds_lstm: 50 # LSTM 的早停法耐心轮次. 
+  precision: 16               # 控制 LSTM 的训练精度(float16 或 float32). 从32修改为16需重新运行数据预处理.

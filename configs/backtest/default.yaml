@@ -1,5 +1,6 @@
+# configs/backtest/default.yaml
 # 回测与可视化配置
-# @package _group_
+# @package backtest
 
 # 回测与业绩评估设定
 backtest_settings:

@@ -51,9 +51,11 @@ class AlphaLabelCalculator(FeaturePostprocessor):
         if self.config.get('global_settings', {}).get('verbose', True):
             print("  - [Post-processing] 正在运行: Alpha 标签计算器 (向量化)...")
 
-        run_config = {**self.config.get('global_settings', {}), **self.config.get('strategy_config', {})}
-        horizon = run_config.get("labeling_horizon", 30)
-        label_col = run_config.get('label_column', 'label_alpha')
+        labeling_cfg = self.config.get('labeling', {})
+        global_cfg = self.config.get('global_settings', {})
+        
+        horizon = labeling_cfg.get("labeling_horizon", 30)
+        label_col = global_cfg.get('label_column', 'label_alpha')
         
         # 1. 准备数据：合并股票数据和因子数据
         df_merged = df.join(factors_df, how='left')
@@ -118,9 +120,11 @@ class RawReturnLabelCalculator(FeaturePostprocessor):
                 return df
 
             # 2. 获取配置
-            # self.config 已经是合并后的 run_config，我们可以直接从顶层获取
-            horizon = self.config.get("labeling_horizon")
-            label_col = self.config.get("label_column")
+            labeling_cfg = self.config.get('labeling', {})
+            global_cfg = self.config.get('global_settings', {})
+
+            horizon = labeling_cfg.get("labeling_horizon")
+            label_col = global_cfg.get("label_column")
 
             # 增加对关键配置是否存在的检查
             if not all([horizon, label_col]):
@@ -173,15 +177,14 @@ class CorrelationSelector(FeaturePostprocessor):
         if self.config.get('global_settings', {}).get('verbose', True):
             print("  - [Post-processing] Running: Correlation Selector...")
         
-        # 1. 合并配置，以便轻松访问所有参数
-        run_config = {**self.config.get('global_settings', {}), **self.config.get('strategy_config', {})}
+        global_cfg = self.config.get('global_settings', {})
+        features_cfg = self.config.get('features', {})
         
         # 2. 定义不应参与相关性筛选的核心列和标签列
-        # 核心的 OHLCV 数据不应被移除
         features_to_exclude = {'open', 'high', 'low', 'close', 'volume'}
         
         # 从配置中获取标签列的名称，并将其加入排除列表
-        label_col = run_config.get('label_column')
+        label_col = global_cfg.get('label_column')
         if label_col:
             features_to_exclude.add(label_col)
             
@@ -204,7 +207,7 @@ class CorrelationSelector(FeaturePostprocessor):
         
         corr_matrix = numeric_df[features_to_check].corr().abs()
         upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-        threshold = run_config.get("correlation_threshold", 0.90)
+        threshold = features_cfg.get("correlation_threshold", 0.90)
         
         to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > threshold)]
         
@@ -226,7 +229,7 @@ ALL_POSTPROCESSORS = [
 
 def run_all_feature_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> pd.DataFrame:
     """
-    (已最终修复) 运行所有后处理器。
+    运行所有后处理器。
     确保了包含 ticker 和 keyword 的 kwargs 在所有调用链中被正确传递。
     """
     df_copy = df.copy()
@@ -238,8 +241,8 @@ def run_all_feature_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> 
         df_copy = processor.process(df_copy, **kwargs)
 
     # --- 2. 根据配置明确选择标签计算器 ---
-    strategy_cfg = config.get('strategy_config', {})
-    labeling_method = strategy_cfg.get('labeling_method', 'raw_return') 
+    labeling_cfg = config.get('labeling', {})
+    labeling_method = labeling_cfg.get('labeling_method', 'raw_return') 
     
     factors_df = kwargs.get('factors_df')
     keyword = kwargs.get('keyword', '未知股票')
@@ -249,9 +252,7 @@ def run_all_feature_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> 
     if labeling_method.lower() == 'alpha' and factors_df is not None:
         print(f"  - [数据后处理] INFO: 对于 {keyword} ({ticker})，配置要求使用 'alpha' 标签且因子数据可用。正在运行 Alpha 标签计算器。")
         label_calculator = AlphaLabelCalculator(config)
-        
-        # (核心修复点) 将 kwargs 传递给 AlphaLabelCalculator 的 process 方法
-        df_copy = label_calculator.process(df_copy, factors_df=factors_df, **kwargs)
+        df_copy = label_calculator.process(df_copy, **kwargs) # kwargs 已经包含了 factors_df
     
     # 在所有其他情况下 (要求 alpha 但因子数据缺失，或直接要求 raw_return)，都使用 RawReturnLabelCalculator
     else:
@@ -259,8 +260,6 @@ def run_all_feature_postprocessors(df: pd.DataFrame, config: dict, **kwargs) -> 
             print(f"  - [数据后处理] WARNNING: 对于 {keyword} ({ticker})，配置要求使用 'alpha' 标签，但因子数据不可用。将回退至【原始收益率】标签。")
         
         label_calculator = RawReturnLabelCalculator(config)
-        
-        # (核心修复点) 将 kwargs 传递给 RawReturnLabelCalculator 的 process 方法
         df_copy = label_calculator.process(df_copy, **kwargs)
         
     return df_copy
