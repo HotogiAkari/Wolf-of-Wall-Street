@@ -160,7 +160,7 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
     """
     print("\n--- 步骤2：准备预测所需的数据 ---")
     
-    # (核心修改 1) 只获取需要的公共接口
+    # 只获取需要的公共接口
     initialize_apis = modules['initialize_apis']
     shutdown_apis = modules['shutdown_apis']
     get_full_feature_df = modules['get_full_feature_df']
@@ -170,7 +170,7 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
     try:
         initialize_apis(config)
         
-        # (核心修改 2) 用一行调用替换所有全局数据获取逻辑
+        # 用一行调用替换所有全局数据获取逻辑
         global_data = get_latest_global_data(config)
 
         # --- 为目标股票获取特征 ---
@@ -187,7 +187,7 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
             end_date_str=end_date_str_stock,
             keyword=keyword, 
             prediction_mode=True,
-            **global_data # <-- 使用字典解包传递所有全局 DataFrame
+            **global_data
         )
     finally:
         shutdown_apis()
@@ -502,8 +502,6 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
     encode_categorical_features = modules.get('encode_categorical_features')
 
     global_settings = config.get('global_settings', {})
-    strategy_config = config.get('strategy_config', {})
-    default_model_params = config.get('default_model_params', {})
     stocks_to_process = config.get('stocks_to_process', [])
 
     # --- 从配置中读取 L3 缓存目录 ---
@@ -1404,7 +1402,7 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
     # 1. 动态更新配置
     print("\n--- 步骤1：动态更新配置 ---")
     today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
-    config['strategy_config']['end_date'] = today_str
+    config['data']['end_date'] = today_str
     print(f"SUCCESS: 配置中的 'end_date' 已动态更新为: {today_str}")
 
     # 2. 调用核心训练工作流
