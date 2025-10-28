@@ -1,51 +1,73 @@
-# 文件路径: utils/config_utils.py
-
-import json
 import yaml
-import torch
-import joblib
-import pandas as pd
 from pathlib import Path
-from tqdm.autonotebook import tqdm
-from sklearn.preprocessing import StandardScaler
+import json # 导入 json 以便美观地打印字典
 
 def load_and_merge_configs_for_notebook(main_config_path: str = 'configs/config.yaml') -> dict:
     """
-    专门为 Jupyter Notebook 设计的配置加载器。
-    模拟 Hydra 的行为，加载并合并所有模块化的子配置文件。
+    为 Jupyter Notebook 设计的配置加载器。
+    模拟 Hydra 的行为。
     """
-    print("--- 正在为 Notebook 加载和合并所有配置文件 ---")
+    print("--- 开始为 Notebook 加载和合并所有配置文件 ---")
+    
     main_config_path = Path(main_config_path)
     config_dir = main_config_path.parent
-    with open(main_config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    print(f"  - 主配置 '{main_config_path.name}' 已加载。")
 
-    defaults = config.get('defaults', [])
-    if not defaults: return config
+    # 1. 加载主配置文件作为基础
+    try:
+        with open(main_config_path, 'r', encoding='utf-8') as f:
+            base_config = yaml.safe_load(f)
+        print(f"  - [DEBUG] 主配置 '{main_config_path.name}' 已加载。")
+    except Exception as e:
+        print(f"  - [FATAL_DEBUG] 加载主配置文件失败: {e}")
+        return {}
 
-    merged_config = {}
+    # 2. 创建一个空的最终配置
+    final_config = {}
+
+    # 3. 定义深度更新函数
+    def deep_update(d, u):
+        for k, v in u.items():
+            if isinstance(v, dict):
+                d[k] = deep_update(d.get(k, {}), v)
+            else:
+                d[k] = v
+        return d
+
+    # 4. 遍历 defaults 列表，依次加载并深度合并
+    defaults = base_config.get('defaults', [])
+    
     for item in defaults:
+        config_to_merge = None
+        item_name = "unknown"
+
+        # a. 处理子配置
         if isinstance(item, dict):
             group, name = list(item.items())[0]
+            item_name = f"{group}/{name}"
             sub_config_path = config_dir / group / f"{name}.yaml"
             if sub_config_path.exists():
                 with open(sub_config_path, 'r', encoding='utf-8') as f:
                     sub_config = yaml.safe_load(f)
-                    # 将子配置内容合并到以组名为 key 的字典中
-                    merged_config[group] = sub_config
-                print(f"  - 子配置 '{sub_config_path.relative_to(config_dir)}' 已加载到 '{group}' 组。")
-    
-    # 深度合并，主配置可以覆盖子配置
-    def deep_merge(source, destination):
-        for key, value in source.items():
-            if isinstance(value, dict) and key in destination:
-                destination[key] = deep_merge(value, destination[key])
+                    # 将其内容包裹在组名下
+                    config_to_merge = {group: sub_config}
             else:
-                destination[key] = value
-        return destination
+                print(f"  - [WARN_DEBUG] 找不到子配置文件: {sub_config_path}")
 
-    final_config = deep_merge(config, merged_config)
-    final_config.pop('defaults', None); final_config.pop('_self_', None)
-    print("--- 所有配置文件合并成功 ---")
+        # b. 处理主配置 (_self_)
+        elif isinstance(item, str) and item == '_self_':
+            item_name = "_self_"
+            config_to_merge = base_config
+
+        # c. 执行合并并打印状态
+        if config_to_merge:
+            print(f"\n  - [DEBUG] 正在合并 '{item_name}'...")
+            deep_update(final_config, config_to_merge)
+            
+            # 检查 stocks_to_process 在这一步之后的状态
+            stocks_after_merge = final_config.get('data', {}).get('stocks_to_process')
+
+    # 5. 清理
+    final_config.pop('defaults', None)
+    
+    print("\n--- 所有配置文件合并完成 ---")
     return final_config

@@ -1,19 +1,16 @@
 # 文件路径: main_train.py
 
-import os
 import sys
 import yaml
 import json
 import torch
 import hydra
 import joblib
-import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm.autonotebook import tqdm
 from omegaconf import DictConfig, OmegaConf
-from utils.file_utils import find_latest_artifact_paths
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler
 
 torch.set_float32_matmul_precision('high')
 
@@ -808,7 +805,7 @@ def run_all_models_train(config: dict, modules: dict,
     global_settings = config.get('global_settings', {})
     strategy_config = config.get('strategy_config', {})
     default_model_params = config.get('default_model_params', {})
-    stocks_to_process = config.get('stocks_to_process', [])
+    stocks_to_process = config.get('data', {}).get('stocks_to_process', [])
     
     # --- 2. 获取 L3 缓存目录路径 ---
     l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/l3_cache')
@@ -1328,7 +1325,7 @@ def run_batch_prediction_workflow(config: dict, modules: dict):
     """
     print("=== 主工作流：启动批量预测 ===")
 
-    stocks_to_predict = config.get('stocks_to_process', [])
+    stocks_to_predict = config.get('data', {}).get('stocks_to_process', [])
     if not stocks_to_predict:
         print("WARNNING: 配置文件中的 'stocks_to_process' 为空，没有可预测的股票。")
         return
@@ -1365,7 +1362,7 @@ def run_periodic_retraining_workflow(config: dict, modules: dict, full_retrain: 
     pd, Path, os, json = modules['pd'], modules['Path'], __import__('os'), modules['json']
     
     # a. 选择一个股票来进行检查
-    stocks_to_process = config.get('stocks_to_process', [])
+    stocks_to_process = config.get('data', {}).get('stocks_to_process', [])
     if not stocks_to_process:
         print("WARNNING: 股票池为空，跳过更新。"); return
     

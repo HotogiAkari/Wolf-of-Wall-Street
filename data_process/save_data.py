@@ -122,7 +122,7 @@ def run_data_pipeline(config: dict):
     print("开始执行数据管道协调任务...")
 
     # --- 前置检查 ---
-    stocks_to_process = config.get('stocks_to_process', [])
+    stocks_to_process = config.get('data', {}).get('stocks_to_process', [])
     if not stocks_to_process:
         print("WARNNING: 股票池为空，无需处理。")
         return
