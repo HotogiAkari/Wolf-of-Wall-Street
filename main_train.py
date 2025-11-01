@@ -160,9 +160,8 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
     """
     print("\n--- 步骤2：准备预测所需的数据 ---")
     
-    # 只获取需要的公共接口
-    initialize_apis = modules['initialize_apis']
-    shutdown_apis = modules['shutdown_apis']
+    # 1. 从 modules 字典中获取所有需要的函数
+    initialize_apis, shutdown_apis = modules['initialize_apis'], modules['shutdown_apis']
     get_full_feature_df = modules['get_full_feature_df']
     get_latest_global_data = modules['get_latest_global_data']
 
@@ -170,11 +169,11 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
     try:
         initialize_apis(config)
         
-        # 用一行调用替换所有全局数据获取逻辑
+        # 2. (核心修改) 用一行调用替换所有全局数据获取逻辑
         global_data = get_latest_global_data(config)
 
-        # --- 为目标股票获取特征 ---
-        max_lookback_days_stock = 365 * 2
+        # 3. 为目标股票获取特征
+        max_lookback_days_stock = 365 * 2 # 可配置
         end_date_dt_stock = pd.Timestamp.now()
         start_date_dt_stock = end_date_dt_stock - pd.DateOffset(days=max_lookback_days_stock)
         start_date_str_stock, end_date_str_stock = start_date_dt_stock.strftime('%Y-%m-%d'), end_date_dt_stock.strftime('%Y-%m-%d')
@@ -187,7 +186,7 @@ def _prophet_get_latest_features(config: dict, modules: dict, target_ticker: str
             end_date_str=end_date_str_stock,
             keyword=keyword, 
             prediction_mode=True,
-            **global_data
+            **global_data # 使用字典解包传递所有全局 DataFrame
         )
     finally:
         shutdown_apis()
@@ -220,6 +219,7 @@ def _prophet_generate_decision(config: dict, modules: dict, artifacts: dict, ful
     
     lstm_params = config.get('model', {}).get('lstm_params', {})
     lstm_seq_len = lstm_params.get('sequence_length', 60)
+    
     if len(feature_df_aligned) < lstm_seq_len:
         raise ValueError(f"对齐后的数据长度 ({len(feature_df_aligned)}) 不足以满足 LSTM 序列长度 ({lstm_seq_len})。")
     
@@ -497,15 +497,18 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
     print("=== 工作流阶段 2.1：为模型预处理数据 (L3 缓存) ===")
     
     # 提取模块和配置
-    Path, joblib, tqdm, pd, torch, np = modules['Path'], modules['joblib'], modules['tqdm'], modules['pd'], modules['torch'], __import__('numpy')
-    get_processed_data_path, walk_forward_split, LSTMBuilder = modules['get_processed_data_path'], modules['walk_forward_split'], modules['LSTMBuilder']
-    encode_categorical_features = modules.get('encode_categorical_features')
+    Path, joblib, tqdm, pd, torch = modules['Path'], modules['joblib'], modules['tqdm'], modules['pd'], modules['torch']
+    get_processed_data_path, walk_forward_split = modules['get_processed_data_path'], modules['walk_forward_split']
+    encode_categorical_features = modules['encode_categorical_features']
+    LSTMBuilder = modules['LSTMBuilder']
 
     global_settings = config.get('global_settings', {})
-    stocks_to_process = config.get('stocks_to_process', [])
+    features_cfg = config.get('features', {}) # walk_forward_split 使用
+    model_cfg = config.get('model', {}) # 所有模型参数的来源
+    data_cfg = config.get('data', {}) # stocks_to_process 的来源
+    stocks_to_process = data_cfg.get('stocks_to_process', [])
 
-    # --- 从配置中读取 L3 缓存目录 ---
-    l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/processed/_l3_cache_by_stock')
+    l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/l3_cache')
     L3_CACHE_DIR = Path(l3_cache_dir_path)
     L3_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     
@@ -532,7 +535,7 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
             
             df = pd.read_pickle(data_path)
             df.index.name = 'date'
-            folds = walk_forward_split(df, strategy_config)
+            folds = walk_forward_split(df, features_cfg)
             if not folds: continue
 
             preprocessed_folds_lgbm, preprocessed_folds_lstm, preprocessed_folds_tabtransformer = [], [], []
@@ -543,18 +546,18 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 y_train, y_val = train_df[label_col], val_df[label_col]
                 X_train_raw, X_val_raw = train_df[features_for_model], val_df[features_for_model]
                 
-                # --- a. LGBM 和 LSTM 的通用标准化 (保持不变) ---
+                # a. LGBM 和 LSTM 的通用标准化
                 train_mean, train_std = X_train_raw.mean(), X_train_raw.std() + 1e-8
                 X_train_scaled = (X_train_raw - train_mean) / train_std
                 X_val_scaled = (X_val_raw - train_mean) / train_std
-                
                 preprocessed_folds_lgbm.append({'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model})
 
-                # --- b. TabTransformer 数据准备流程 ---
+                # b. TabTransformer 的专属数据准备
                 use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
                 if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer:
                     try:
-                        cat_features = default_model_params.get('tabtransformer_params', {}).get('categorical_features', [])
+                        tabt_params = model_cfg.get('tabtransformer_params', {})
+                        cat_features = tabt_params.get('categorical_features', [])
                         if not cat_features:
                             print(f"WARNNING: 为 TabTransformer 配置的 categorical_features 为空，跳过。")
                             continue
@@ -592,7 +595,9 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
                 if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
                     try:
-                        lstm_seq_len = default_model_params.get('lstm_params', {}).get('sequence_length', 60)
+                        lstm_params = model_cfg.get('lstm_params', {})
+                        lstm_seq_len = lstm_params.get('sequence_length', 60)
+                        
                         if len(X_train_scaled) < lstm_seq_len: continue
                         train_df_scaled_for_lstm = X_train_scaled.copy(); train_df_scaled_for_lstm[label_col] = y_train
                         val_df_scaled_for_lstm = X_val_scaled.copy(); val_df_scaled_for_lstm[label_col] = y_val
