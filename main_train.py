@@ -487,24 +487,25 @@ def run_all_data_pipeline(config: dict, modules: dict, use_today_as_end_date=Fal
 
 # --- 2. 阶段二：模型流水线 ---
 
-def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) -> dict:
+def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False):
     """
-    执行 L3 数据预处理与缓存。
-    - 使用配置文件中定义的目录。
-    - 采用分块保存策略，为每只股票单独保存 L3 缓存，以避免 MemoryError。
-    - 在函数末尾重新加载所有缓存以供当次运行使用。
+    (大修最终版 v3) 执行 L3 数据预处理与缓存。
+    确保从所有正确的 Hydra 配置组中读取参数。
     """
     print("=== 工作流阶段 2.1：为模型预处理数据 (L3 缓存) ===")
     
-    # 提取模块和配置
+    # --- 1. 提取模块和配置 ---
     Path, joblib, tqdm, pd, torch = modules['Path'], modules['joblib'], modules['tqdm'], modules['pd'], modules['torch']
-    get_processed_data_path, walk_forward_split = modules['get_processed_data_path'], modules['walk_forward_split']
+    get_processed_data_path = modules['get_processed_data_path']
+    walk_forward_split = modules['walk_forward_split']
     encode_categorical_features = modules['encode_categorical_features']
     LSTMBuilder = modules['LSTMBuilder']
 
+    # (核心修复 1) 从新的、正确的 Hydra 配置组中获取所有需要的参数
     global_settings = config.get('global_settings', {})
-    model_cfg = config.get('model', {}) # 所有模型参数的来源
-    data_cfg = config.get('data', {}) # stocks_to_process 的来源
+    features_cfg = config.get('features', {})      # <-- 关键：获取 'features' 组
+    model_cfg = config.get('model', {})            # <-- 关键：获取 'model' 组
+    data_cfg = config.get('data', {})              # <-- 关键：获取 'data' 组
     stocks_to_process = data_cfg.get('stocks_to_process', [])
 
     l3_cache_dir_path = global_settings.get('l3_cache_dir', 'data/l3_cache')
@@ -516,7 +517,7 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
         for f in L3_CACHE_DIR.glob("*.joblib"):
             f.unlink()
 
-    # --- 循环内处理和分块保存 ---
+    # --- 2. 循环内处理和分块保存 ---
     print("INFO: 开始执行预处理流程 (分块保存模式)...\n")
     if config and stocks_to_process:
         for stock_info in tqdm(stocks_to_process, desc="正在预处理股票"):
@@ -534,7 +535,9 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
             
             df = pd.read_pickle(data_path)
             df.index.name = 'date'
-            folds = walk_forward_split(df, config)
+            
+            # (核心修复 2) walk_forward_split 需要 'features' 组的配置
+            folds = walk_forward_split(df, features_cfg)
             if not folds: continue
 
             preprocessed_folds_lgbm, preprocessed_folds_lstm, preprocessed_folds_tabtransformer = [], [], []
@@ -555,25 +558,21 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
                 if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer:
                     try:
-                        tabt_params = model_cfg.get('tabtransformer_params', {})
+                        # (核心修复 3) 从 model_cfg 中获取 tabtransformer 的专属配置
+                        tabt_params = model_cfg.get('tabtransformer', {})
                         cat_features = tabt_params.get('categorical_features', [])
                         if not cat_features:
-                            print(f"WARNNING: 为 TabTransformer 配置的 categorical_features 为空，跳过。")
+                            print(f"WARNNING: (Fold {i+1}) 为 TabTransformer 配置的 categorical_features 为空，跳过。")
                             continue
-
+                        
                         cont_features = [c for c in features_for_model if c not in cat_features]
                         
-                        # 步骤 1: 先在原始数据上进行类别编码
                         X_train_encoded, X_val_encoded, encoders = encode_categorical_features(X_train_raw.copy(), X_val_raw.copy(), cat_features)
                         
-                        # 步骤 2: 然后只对连续特征计算均值/标准差，并进行标准化
-                        train_mean_cont = X_train_encoded[cont_features].mean()
-                        train_std_cont = X_train_encoded[cont_features].std() + 1e-8
-                        
+                        train_mean_cont, train_std_cont = X_train_encoded[cont_features].mean(), X_train_encoded[cont_features].std() + 1e-8
                         X_train_encoded[cont_features] = (X_train_encoded[cont_features] - train_mean_cont) / train_std_cont
                         X_val_encoded[cont_features] = (X_val_encoded[cont_features] - train_mean_cont) / train_std_cont
                         
-                        # 步骤 3: 准备 Tensors
                         cat_dims = [len(encoders[col].classes_) for col in cat_features]
                         
                         preprocessed_folds_tabtransformer.append({
@@ -588,16 +587,18 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                             'feature_cols': features_for_model
                         })
                     except Exception as e:
-                        print(f"\nERROR (L3 Cache Gen): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
-
-                # --- LSTM 数据准备 ---
+                        print(f"\nERROR (L3 Cache Gen / TabT): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 TabTransformer 数据时出错: {e}")
+                
+                # c. LSTM 数据准备
                 use_lstm = stock_info.get('use_lstm', global_settings.get('use_lstm_globally', True))
                 if 'lstm' in global_settings.get('models_to_train', []) and use_lstm:
                     try:
-                        lstm_params = model_cfg.get('lstm_params', {})
+                        # (核心修复 4) 从 model_cfg 中获取 lstm 的专属配置
+                        lstm_params = model_cfg.get('lstm', {})
                         lstm_seq_len = lstm_params.get('sequence_length', 60)
                         
                         if len(X_train_scaled) < lstm_seq_len: continue
+                        
                         train_df_scaled_for_lstm = X_train_scaled.copy(); train_df_scaled_for_lstm[label_col] = y_train
                         val_df_scaled_for_lstm = X_val_scaled.copy(); val_df_scaled_for_lstm[label_col] = y_val
                         train_history_for_val = train_df_scaled_for_lstm.iloc[-lstm_seq_len:]
@@ -609,19 +610,24 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
 
                         if X_train_seq.shape[0] == 0 or X_val_seq.shape[0] == 0: continue
                         preprocessed_folds_lstm.append({
-                            'X_train_tensor': torch.from_numpy(X_train_seq.copy()).float(), 'y_train_tensor': torch.from_numpy(y_train_seq.copy()).float().unsqueeze(1),
-                            'X_val_tensor': torch.from_numpy(X_val_seq.copy()).float(), 'y_val_tensor': torch.from_numpy(y_val_seq.copy()).float().unsqueeze(1),
-                            'y_val_seq': y_val_seq, 'dates_val_seq': dates_val_seq, 'feature_cols': features_for_model
+                            'X_train_tensor': torch.from_numpy(X_train_seq.copy()).float(), 
+                            'y_train_tensor': torch.from_numpy(y_train_seq.copy()).float().unsqueeze(1),
+                            'X_val_tensor': torch.from_numpy(X_val_seq.copy()).float(), 
+                            'y_val_tensor': torch.from_numpy(y_val_seq.copy()).float().unsqueeze(1),
+                            'y_val_seq': y_val_seq, 
+                            'dates_val_seq': dates_val_seq, 
+                            'feature_cols': features_for_model
                         })
                     except Exception as e:
-                        print(f"\nERROR (L3 Cache Gen): 为 {keyword} ({ticker}) 的 Fold {i+1} 生成 LSTM 数据时出错: {e}")
+                        print(f"\nERROR (L3 Cache Gen / LSTM): 在为 {keyword} ({ticker}) 的 Fold {i+1} 生成 LSTM 数据时出错: {e}")
 
             stock_data_cache = {'full_df': df, 'lgbm_folds': preprocessed_folds_lgbm, 'lstm_folds': preprocessed_folds_lstm, 'tabtransformer_folds': preprocessed_folds_tabtransformer}
             try:
                 joblib.dump(stock_data_cache, stock_l3_cache_path)
             except Exception as e:
                 tqdm.write(f"ERROR: 为 {keyword} ({ticker}) 保存 L3 缓存时失败: {e}")
-    print("--- INFO: L3 缓存文件已在磁盘上准备就绪。 ---")
+    
+    print("\n--- INFO: L3 缓存文件已在磁盘上准备就绪。 ---")
     print("--- 阶段 2.1 成功完成。 ---")
 
 def run_hpo_train(config: dict, modules: dict):
