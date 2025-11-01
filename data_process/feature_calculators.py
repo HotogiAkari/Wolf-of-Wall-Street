@@ -4,6 +4,7 @@
 '''
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 import statsmodels.api as sm
 from utils.registry import Registry
 from abc import ABC, abstractmethod

@@ -63,11 +63,11 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
         print("INFO: 没有需要保存的数据。")
         return
         
-    stocks_config_map = {s['ticker']: s for s in config.get('stocks_to_process', [])}
+    data_cfg = config.get('data', {})
+    stocks_config_map = {s['ticker']: s for s in data_cfg.get('stocks_to_process', [])}
     
-    # 从 config 中获取本次运行的日期范围
-    start_date = config['strategy_config'].get('start_date', 'N/A')
-    end_date = config['strategy_config'].get('end_date', 'N/A')
+    start_date = data_cfg.get('start_date', 'N/A')
+    end_date = data_cfg.get('end_date', 'N/A')
     
     print("--- 正在保存处理好的数据... ---")
     
@@ -109,7 +109,8 @@ def save_processed_data(processed_data: Dict[str, pd.DataFrame], config: Dict):
             print(f"    - INFO: 元信息已保存至: {meta_file_path}")
 
         except Exception as e:
-            print(f"    - ERROR: 保存 {keyword} ({ticker}) 数据时发生错误: {e}")
+            keyword_for_error = locals().get('keyword', ticker)
+            print(f"    - ERROR: 保存 {keyword_for_error} ({ticker}) 数据时发生错误: {e}")
             
     print("\n--- 所有数据保存完毕。 ---")
 

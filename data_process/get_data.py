@@ -436,7 +436,7 @@ def get_full_feature_df(
     factors_df: Optional[pd.DataFrame] = None
 ) -> Optional[pd.DataFrame]:
     """
-    (已最终修复) 为单个股票执行完整的特征生成流程。
+    为单个股票执行完整的特征生成流程。
     """
     display_name = keyword if keyword else ticker
     if prediction_mode:
@@ -446,17 +446,24 @@ def get_full_feature_df(
     
     global_settings = config.get('global_settings', {})
     strategy_config = config.get('strategy_config', {})
-    stock_info = next((s for s in config.get('stocks_to_process', []) if s['ticker'] == ticker), {})
-    run_config = {**global_settings, **strategy_config, **stock_info}
+    data_cfg = config.get('data', {})
+    stock_info = next((s for s in data_cfg.get('stocks_to_process', []) if s['ticker'] == ticker), {})
+    run_config = {
+        **config.get('global_settings', {}),
+        **data_cfg,
+        **config.get('features', {}),
+        **config.get('labeling', {}),
+        **stock_info # 个股配置优先级最高
+    }
 
     print(f"  - 数据窗口: {start_date_str} to {end_date_str}")
     
     # --- 1. 数据获取 ---
     cache_dir = Path(run_config.get("data_cache_dir", "data_cache"))
     
-    df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=display_name, config=config)
+    df = _get_ohlcv_data_bs(_get_api_ticker(ticker), start_date_str, end_date_str, cache_dir, keyword=keyword, config=config)
     if df is None:
-        raise ValueError(f"为 {display_name} ({ticker}) 获取基础 OHLCV 数据失败。")
+        raise ValueError(f"为 {keyword} ({ticker}) 获取基础 OHLCV 数据失败。")
 
     industry_ticker = run_config.get('industry_etf')
     if industry_ticker:
@@ -485,7 +492,7 @@ def get_full_feature_df(
         df = df.join(industry_df[['close']].rename(columns={'close': 'industry_close'}), how='left')
         
     # --- 3. 核心特征计算 ---
-    run_config_with_api = {**run_config, 'tushare_pro_instance': globals().get('pro'), 'ticker': ticker}
+    run_config_with_api = {**config, 'tushare_pro_instance': globals().get('pro'), 'ticker': ticker}
     extra_data_for_calc = {'external_market_df': external_market_df}
     df = run_all_feature_calculators(df, run_config_with_api, **extra_data_for_calc)
     
@@ -498,7 +505,7 @@ def get_full_feature_df(
     else: # 训练模式
         print("INFO: 训练模式，将运行完整的后处理流程 (包括特征选择和标签生成)。")
         extra_data_for_post['factors_df'] = factors_df
-        df = run_all_feature_postprocessors(df, run_config, **extra_data_for_post)
+        df = run_all_feature_postprocessors(df, config, **extra_data_for_post)
         
     # --- 5. 数据清洗和校验 ---
     df.replace([np.inf, -np.inf], np.nan, inplace=True)

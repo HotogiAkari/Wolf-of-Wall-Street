@@ -53,9 +53,9 @@ class AlphaLabelCalculator(FeaturePostprocessor):
 
         labeling_cfg = self.config.get('labeling', {})
         global_cfg = self.config.get('global_settings', {})
-        
-        horizon = labeling_cfg.get("labeling_horizon", 30)
-        label_col = global_cfg.get('label_column', 'label_alpha')
+
+        horizon = labeling_cfg.get("labeling_horizon")
+        label_col = global_cfg.get("label_column")
         
         # 1. 准备数据：合并股票数据和因子数据
         df_merged = df.join(factors_df, how='left')
