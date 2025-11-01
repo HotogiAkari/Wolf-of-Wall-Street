@@ -503,7 +503,6 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
     LSTMBuilder = modules['LSTMBuilder']
 
     global_settings = config.get('global_settings', {})
-    features_cfg = config.get('features', {}) # walk_forward_split 使用
     model_cfg = config.get('model', {}) # 所有模型参数的来源
     data_cfg = config.get('data', {}) # stocks_to_process 的来源
     stocks_to_process = data_cfg.get('stocks_to_process', [])
@@ -535,7 +534,7 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
             
             df = pd.read_pickle(data_path)
             df.index.name = 'date'
-            folds = walk_forward_split(df, features_cfg)
+            folds = walk_forward_split(df, config)
             if not folds: continue
 
             preprocessed_folds_lgbm, preprocessed_folds_lstm, preprocessed_folds_tabtransformer = [], [], []
@@ -546,13 +545,13 @@ def run_preprocess_l3_cache(config: dict, modules: dict, force_reprocess=False) 
                 y_train, y_val = train_df[label_col], val_df[label_col]
                 X_train_raw, X_val_raw = train_df[features_for_model], val_df[features_for_model]
                 
-                # a. LGBM 和 LSTM 的通用标准化
+                # a. LGBM 通用标准化
                 train_mean, train_std = X_train_raw.mean(), X_train_raw.std() + 1e-8
                 X_train_scaled = (X_train_raw - train_mean) / train_std
                 X_val_scaled = (X_val_raw - train_mean) / train_std
                 preprocessed_folds_lgbm.append({'X_train_scaled': X_train_scaled, 'y_train': y_train, 'X_val_scaled': X_val_scaled, 'y_val': y_val, 'feature_cols': features_for_model})
 
-                # b. TabTransformer 的专属数据准备
+                # b. TabTransformer 专属数据准备
                 use_tabtransformer = stock_info.get('use_tabtransformer', global_settings.get('use_tabtransformer_globally', True))
                 if 'tabtransformer' in global_settings.get('models_to_train', []) and use_tabtransformer:
                     try:
@@ -691,7 +690,7 @@ def run_hpo_train(config: dict, modules: dict):
                 print(f"\nINFO: {keyword} ({ticker}) 已配置为不使用 {model_type_for_hpo.upper()}，跳过 HPO。")
                 continue
 
-            # --- 5. (核心修改) Just-in-Time 加载 L3 缓存 ---
+            # --- 5. 加载 L3 缓存 ---
             stock_l3_cache_path = L3_CACHE_DIR / f"{ticker}.joblib"
             if not stock_l3_cache_path.exists():
                 print(f"ERROR: 预处理数据缓存中未找到 {keyword} ({ticker}) 的数据文件。跳过 HPO。")
@@ -877,16 +876,16 @@ def run_all_models_train(config: dict, modules: dict,
                     print(f"WARNNING: 未找到 {keyword} ({ticker}) 的 '{model_type}' 预处理 folds。跳过训练。")
                     continue
 
-                run_config = {
-                    'global_settings': global_settings, 'strategy_config': strategy_config,
-                    'default_model_params': default_model_params, 'stocks_to_process': [stock_info],
-                    'full_df_for_final_model': full_df
-                }
+                config_for_run = config.copy()
+                config_for_run['full_df_for_final_model'] = full_df
 
                 ic_history = run_training_for_ticker(
                     preprocessed_folds=preprocessed_folds,
-                    ticker=ticker, model_type=model_type, config=run_config, 
-                    force_retrain=force_retrain_base, keyword=keyword
+                    ticker=ticker, 
+                    model_type=model_type, 
+                    config=config_for_run,
+                    force_retrain=force_retrain_base, 
+                    keyword=keyword
                 )
                 
                 if ic_history is not None and not ic_history.empty:

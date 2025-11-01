@@ -5,7 +5,11 @@ defaults:
   - data: default
   - features: default
   - labeling: raw_return
-  - model: lgbm
+  - override /model: # 要填充 model 组
+      - lgbm
+      - lstm
+      - tabtransformer
+      - fuser
   - hpo: default
   - backtest: default
   - application: default

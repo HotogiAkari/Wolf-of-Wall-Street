@@ -52,7 +52,9 @@ def run_training_for_ticker(
     model_suffix = file_suffixes.get(model_type, '.pkl')
     
     # 预先计算出当前配置对应的最终模型版本和路径
-    end_date_str = config.get('data', {}).get('end_date', 'unknown_date')
+    end_date_str = config.get('data', {}).get('end_date')
+    if not end_date_str:
+        raise ValueError("无法从配置的 'data' 组中获取 'end_date'，无法确定模型版本。")
     version_date = pd.to_datetime(end_date_str).strftime('%Y%m%d')
     
     final_model_path = model_dir / f"{model_type}_model_{version_date}{model_suffix}"

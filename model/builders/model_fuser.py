@@ -45,7 +45,7 @@ class ModelFuser:
             self.scaler_path = self.model_dir / "fuser_scaler.pkl"
             self.meta_path = self.model_dir / "fuser_meta.json"
 
-        fuser_config = self.config.get('model', {}).get('fuser_params', {})
+        fuser_config = config.get('model', {}).get('fuser', {})
         self.verbose = fuser_config.get('verbose', True)
 
         # 将 scaler 的初始化也放在这里

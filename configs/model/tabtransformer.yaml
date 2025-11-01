@@ -1,20 +1,18 @@
 # configs/model/tabtransformer.yaml
 # TabTransformer配置参数
-# @package model
 
-tabtransformer_params:
-  categorical_features: ['day_of_week', 'month', 'regime_is_uptrend', 'regime_is_high_vol']   # 定义哪些特征是类别特征 (必须是整数编码)
+categorical_features: ['day_of_week', 'month', 'regime_is_uptrend', 'regime_is_high_vol']   # 定义哪些特征是类别特征 (必须是整数编码)
   
-  # 训练参数
-  verbose_period: 10          # 表示主训练时，每 n 轮打印一次验证集损失
-  epochs: 100                 # 最大的训练轮次. 通常由早停法提前终止.
-  final_model_epochs: 50      # 最终模型训练的固定轮次
-  batch_size: 256             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
-  learning_rate: 0.005        # 优化器（如 Adam）的学习率. 
-  early_stopping_rounds: 20   # 早停法耐心轮次.
+# 训练参数
+verbose_period: 10          # 表示主训练时，每 n 轮打印一次验证集损失
+epochs: 100                 # 最大的训练轮次. 通常由早停法提前终止.
+final_model_epochs: 50      # 最终模型训练的固定轮次
+batch_size: 256             # 批次大小. 每次更新模型权重时使用的数据样本数. 受显存大小限制. 
+learning_rate: 0.005        # 优化器（如 Adam）的学习率. 
+early_stopping_rounds: 20   # 早停法耐心轮次.
   
-  # 模型结构参数
-  dim: 32       # Embedding 和 Transformer 的内部维度
-  depth: 4      # Transformer 层的数量
-  heads: 4      # 多头注意力的头的数量
-  dropout: 0.1  # Dropout 比例
+# 模型结构参数
+dim: 32       # Embedding 和 Transformer 的内部维度
+depth: 4      # Transformer 层的数量
+heads: 4      # 多头注意力的头的数量
+dropout: 0.1  # Dropout 比例

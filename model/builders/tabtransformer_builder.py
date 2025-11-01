@@ -71,9 +71,10 @@ class TabTransformerBuilder(BaseBuilder):
         super().__init__(config)
         global_cfg = config.get('global_settings', {})
         
-        default_params = config.get('model', {}).get('tabtransformer_params', {})
-        hpo_params = config.get('hpo', {}).get('tabtransformer_hpo_config', {}).get('params', {})
-        self.model_params = {**default_params, **hpo_params}
+        default_params = config.get('model', {}).get('tabtransformer', {})
+        hpo_fixed_params = config.get('hpo', {}).get('tabtransformer_hpo_config', {}).get('params', {})
+        trial_params = config.get('model', {}).get('tabtransformer', {})
+        self.model_params = {**default_params, **hpo_fixed_params, **trial_params}
         
         self.label_col = global_cfg.get('label_column', 'label_return')
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'

@@ -91,15 +91,17 @@ def objective(trial, preprocessed_folds: list, config: dict, model_type: str = '
 
     # 将搜索到的参数更新到 config 副本中
     # 1. 基础参数来自 'model' 组
-    base_params = config.get('model', {}).get(f'{model_type}_params', {}).copy()
+    base_params = config.get('model', {}).get(model_type, {}).copy()
     # 2. HPO 期间的固定参数来自 'hpo' 组
+    model_hpo_config = config.get('hpo', {}).get(f'{model_type}_hpo_config', {})
     hpo_fixed_params = model_hpo_config.get('params', {}).copy()
     # 3. 合并： trial 参数 > HPO 固定参数 > 默认模型参数
     final_params = {**base_params, **hpo_fixed_params, **params_to_tune}
     # 4. 将最终参数注入到一个临时的 config 副本中，用于实例化 Builder
+    hpo_trial_config = config.copy()
     if 'model' not in hpo_trial_config:
         hpo_trial_config['model'] = {}
-    hpo_trial_config['model'][f'{model_type}_params'] = final_params
+    hpo_trial_config['model'][model_type] = final_params
     
     if not preprocessed_folds:
         return -10.0

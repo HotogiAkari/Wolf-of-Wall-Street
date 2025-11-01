@@ -15,11 +15,11 @@ class LGBMBuilder(BaseBuilder):
         
         global_cfg = config.get('global_settings', {})
 
-        default_params = config.get('model', {}).get('lgbm_params', {})
+        default_params = config.get('model', {}).get('lgbm', {})
+        
         hpo_fixed_params = config.get('hpo', {}).get('lgbm_hpo_config', {}).get('params', {})
-
-        # 这里的 trial_params 是为了 HPO 流程准备的，它会覆盖其他同名参数
-        trial_params = config.get('model', {}).get('lgbm_params', {})
+        
+        trial_params = config.get('model', {}).get('lgbm', {})
         
         final_params = {**default_params, **hpo_fixed_params, **trial_params}
         final_params['random_state'] = global_cfg.get('seed', 42)

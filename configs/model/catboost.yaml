@@ -1,6 +1,4 @@
 # configs/model/catboost.yaml
-# @package model
 
-catboost_params:
-  # 留空，或者添加一些默认参数
-  verbose: 0
+# 留空，或者添加一些默认参数
+verbose: 0
